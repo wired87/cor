@@ -1,0 +1,22 @@
+.git/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+
+# build artifacts / outputs
+color_master_output/
+output_dir/
+output_dir_*/
+
+# embedding / vector store backups
+embed_backup/
+embeddings_backup/
+.git_embedded_backup/
+
+# local env
+.env
+.env.*
