@@ -4,8 +4,6 @@ import base64
 import os
 import pprint
 
-from itertools import product
-
 import json
 
 import numpy as np
@@ -17,53 +15,44 @@ from module_manager.mcreator import ModuleCreator
 from qfu.all_subs import ALL_SUBS
 from qfu.qf_utils import QFUtils
 from utils._str import clean_underscores_front_back, rm_prev_mark
-from utils.get_shape import get_shape, extract_complex
+from utils.get_shape import extract_complex
 from utils.math.operator_handler import EqExtractor
 from utils._np.expand_array import expand_structure
 
-
-class PatternMaster:
-
-    def __init__(self, g):
-        """
-        Initialize the PatternMaster instance state.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `g`.
-        2. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - `g`: Graph instance that the workflow reads from or mutates.
-
-        Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
-        """
-        self.g=g
-        self.modules_struct=[]
-        self.schema_pos=[]
+EXCLUDED_ORIGINS = ["neighbor", "interactant"]
 
 
-
-class Guard(
-    PatternMaster,
-):
+class Guard:
     # todo answer caching
     # todo cross module param edge map
     """
     nodes -> guard: extedn admin_data
 
     todo: curretnly all dims implemented within single db inject-> create db / d whcih captures jsut sinfle point
+
+    Run-state (authoritative after ``main`` / ``converter``; mirrored onto graph METHOD nodes in ``method_layer``):
+    - ``self.sim_time`` — simulation length / steps from the caller
+    - ``self.amount_nodes`` — spatial node count
+    - ``self.dims`` — coordinate dimensionality (e.g. 3 for x,y,z)
     """
 
     def __init__(
         self,
+        amount_nodes,
+        sim_time,
+        dims,
         qfu,
         g,
         user_id,
         injector = None,
+        cfg_file="sim_config.json"
     ):
         """
         Initialize the Guard instance state.
+
+        Prompt: paste sim_time, amount_nodes and dims to guard headers and distribute self-states
+        in the underlying method tree. Initial spatial count comes from ``amount_nodes``; ``sim_time``
+        and ``dims`` are set when ``main`` / ``converter`` run.
 
         Workflow:
         1. Reads and normalizes the incoming inputs, including `qfu`, `g`, `user_id`.
@@ -79,21 +68,18 @@ class Guard(
         - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
         """
         print("Initializing Guard...")
-
-        PatternMaster.__init__(
-            self,
-            g,
-        )
         self.user_id = user_id
         print("DEBUG: QBrainTableManager initialized")
 
+        self.amount_nodes = amount_nodes
+        self.sim_time = sim_time
+        self.dims = dims
 
         self.world_cfg = None
-        self._artifact_admin = None  # Lazy: only when handle_deployment runs
-        self.time = 0
+
         self.qfu:QFUtils = qfu
         self.g = g
-        self.injector = injector or Injector(g, int(os.environ["AMOUNT_NODES"]))
+        self.injector = injector or Injector(g, amount_nodes)
         self.ready_map = {
             k: False
             for k in ALL_SUBS
@@ -107,15 +93,16 @@ class Guard(
         )
 
         self.eq_extractor = EqExtractor()
-        #self.operator_handler = OperatorHandler()
-
-        self.prev_state = None
-        self.model_params = None
-        self.fnished_modules = False
 
         self.code_extractor = StructInspector(
             g=self.g,
         )
+
+        self.cfg_file = cfg_file
+        project_root = os.path.dirname(os.path.dirname(__file__))
+
+        if not os.path.isabs(self.cfg_file):
+            self.cfg_file = os.path.join(project_root, self.cfg_file)
 
         self.fields = []
         print("Guard Initialized!")
@@ -164,54 +151,36 @@ class Guard(
             self.g.update_node({"id": "GHOST_MODULE", "module_index": len(modules)})
 
 
-    def main(self, env_id="public", cfg_path=None, grid_animation_recorder=None):
+    def main(self, env_id="public"):
         """
         Run the main Guard workflow.
 
         Workflow:
         1. Reads and normalizes the incoming inputs, including `env_id`, `cfg_path`, `grid_animation_recorder`.
-        2. Builds intermediate state such as `components`, `project_root`, `cfg_file` before applying the main logic.
+        2. Binds `amount_nodes`, `sim_time`, `dims` on `self` then builds `components` via `converter`.
         3. Branches on validation or runtime state to choose the next workflow path.
         4. Delegates side effects or helper work through `print()`, `self.converter()`, `os.path.dirname()`.
         5. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
 
         Inputs:
+        - `amount_nodes`: Spatial node count for this run.
+        - `sim_time`: Simulation steps / time horizon for this run.
+        - `dims`: Coordinate dimensionality for this run.
         - `env_id`: Identifier used to target the relevant entity.
-        - `cfg_path`: Caller-supplied value used during processing.
-        - `grid_animation_recorder`: Caller-supplied value used during processing.
 
         Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
+        - Returns the `components` dict for downstream JAX / cfg consumers.
         """
         print("Guard.main...")
-
-        components = self.converter(env_id)
-
+        components = self.converter(
+            env_id, self.amount_nodes, self.sim_time, self.dims
+        )
         print("start_grid_local...")
 
-        project_root = os.path.dirname(os.path.dirname(__file__))
-        cfg_file = cfg_path or os.getenv("GRID_CFG_PATH", "test_out.json")
-
-        if not os.path.isabs(cfg_file):
-            cfg_file = os.path.join(project_root, cfg_file)
-
-        with open(cfg_file, "w") as f:
+        with open(self.cfg_file, "w") as f:
             f.write(json.dumps(components, indent=4))
-        print(f"[LOCAL_DB] cfg written to {cfg_file}:")
-        # Keep the run loop readable: printing the full DB payload floods stdout
-        # and hides the next real engine error behind megabytes of debug output.
-        print(
-            "[LOCAL_DB] cfg summary:",
-            {
-                "keys": sorted(components.keys()),
-                "db_keys": len(components.get("DB_KEYS", []) or []),
-                "fields": len(components.get("FIELDS", []) or []),
-                "modules": len(components.get("MODULES", []) or []),
-            },
-        )
+        print(f"Guard cfg written to {self.cfg_file}:")
 
-        if grid_animation_recorder is not None:
-            grid_animation_recorder.finish()
         print("components", components)
         print("Guard.main... done")
         return components
@@ -309,10 +278,16 @@ class Guard(
 
 
 
-    def converter(self, env_id:str):
+    def converter(self, env_id:str, amount_nodes, sim_time, dims):
         """
         CREATE/COLL ECT PATTERNS FOR ALL ENVS AND CREATE VM
+
+        CHAR: Sync run scalars on ``self`` so every subgraph helper (e.g. energy/injector) and
+        ``method_layer`` see the same ``amount_nodes``, ``sim_time``, ``dims`` as the cfg dict.
         """
+        self.amount_nodes = int(amount_nodes)
+        self.sim_time = int(sim_time)
+        self.dims = int(dims)
         print("Main started...")
         env_node = self.g.get_node(env_id)
         if not env_node:
@@ -356,7 +331,11 @@ class Guard(
             **injection_patterns,
             **db_to_method_struct,
             "METHOD_TO_DB": method_to_db if method_to_db is not None else [],
+            "AMOUNT_NODES": amount_nodes,
+            "SIM_TIME": sim_time,
+            "DIMS": dims,
         }
+
 
         components = self._sanitize_components(components)
         local_db = os.getenv("LOCAL_DB", "True") == "True"
@@ -543,8 +522,8 @@ class Guard(
 
         try:
             schema_positions = self.injector.get_positions(
-                amount=int(os.getenv("AMOUNT_NODES")),
-                dim=int(os.getenv("DIMS")),
+                amount=self.amount_nodes,
+                dim=self.dims,
             )
 
             modules = self.g.get_nodes(
@@ -637,8 +616,6 @@ class Guard(
         except Exception as e:
             print("Err handle_energy_components", e)
         return INJECTOR
-
-
 
 
     def set_param_index_map(self):
@@ -1011,8 +988,6 @@ class Guard(
             print("classification completed...")
             return classification
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.classify_equations_for_module | handler_line=1707 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.classify_equations_for_module: {e}")
             print("Err classify_equations_for_module failed", e)
             return {"differential": [], "cor": []}
 
@@ -1026,7 +1001,7 @@ class Guard(
 
         Workflow:
         1. Reads and normalizes the incoming inputs, including `modules`.
-        2. Builds intermediate state such as `mod_len_exclude_ghost`, `method_struct`, `mnames` before applying the main logic.
+        2. Builds `method_struct` and writes current `self.sim_time`, `self.amount_nodes`, `self.dims` onto each graph METHOD node (method tree).
         3. Branches on validation or runtime state to choose the next workflow path.
         4. Delegates side effects or helper work through `print()`, `len()`, `range()`.
         5. Returns the assembled result to the caller.
@@ -1044,14 +1019,9 @@ class Guard(
             "METHOD_PARAM_LEN_CTLR": [[] for _ in range(mod_len_exclude_ghost)],
             "METHODS": [[] for _ in range(mod_len_exclude_ghost)],
             "METHODS_PER_MOD_LEN_CTLR": [0 for _ in range(mod_len_exclude_ghost)],
-
-
-            #"NEIGHBOR_CTLR": [[] for _ in range(mod_len_exclude_ghost)],
-
         }
 
         mnames = [[] for _ in range(mod_len_exclude_ghost)]
-
         try:
             for mid, module in modules:
                 # ghost does not have equation
@@ -1064,11 +1034,8 @@ class Guard(
                     trgt_rel="has_method",
                     node=mid,
                 )
-                print("methods:", [k for k, v in self.g.G.nodes(data=True) if (v or {}).get("type") == "METHOD"])
-                print(f"methods neighbor of {mid}:", methods)
 
-                # CHAR: methods is list-of-tuples [(id, attrs), ...] — extract IDs accordingly
-                mids = [m[0] for m in methods] if methods else []
+                mids = [defid for defid, defattrs in methods]
                 mlen: int = len(mids)
 
                 if not mlen:
@@ -1076,15 +1043,25 @@ class Guard(
                     continue
 
                 # Classification struct per module
-                method_struct["METHODS"][midx]:dict[str, list[int]] = self.classify_equations_for_module(
-                    methods
-                )
+                method_struct["METHODS"][midx] = [muattrs.get("code") for muid, muattrs in methods]
 
                 print(f"method_struct[METHODS][midx] for {mid} set")
 
                 # LEN PARAMS / METHOD
-                method_struct["METHOD_PARAM_LEN_CTLR"][midx].append(mlen)
-                print(f"METHOD_PARAM_LEN_CTLR for {mid} set")
+                for mu_id, mu_attrs  in methods:
+                    params_len = len(mu_attrs["params"])
+                    method_struct[
+                        "METHOD_PARAM_LEN_CTLR"
+                    ][midx].append(params_len)
+                    # CHAR: same run spec on every METHOD node for inspectors / QF / downstream
+                    if self.g is not None and mu_id is not None:
+                        self.g.update_node({
+                            "id": mu_id,
+                            "sim_time": int(self.sim_time),
+                            "amount_nodes": int(self.amount_nodes),
+                            "dims": int(self.dims),
+                        })
+
                 # len methods per module
                 method_struct["METHODS_PER_MOD_LEN_CTLR"][midx] = mlen
                 print(f"METHODS_PER_MOD_LEN_CTLR for {mid} set")
@@ -1096,27 +1073,31 @@ class Guard(
             for sublist in method_struct["METHOD_PARAM_LEN_CTLR"]:
                 flatten_ctlr.extend(sublist)
             method_struct["METHOD_PARAM_LEN_CTLR"] = flatten_ctlr
-            print(f"METHOD_PARAM_LEN_CTLR finished")
+            print(f"METHOD_PARAM_LEN_CTLR finished", method_struct["METHOD_PARAM_LEN_CTLR"])
 
-            """
-            flatten_neighbor_ctlr = []
-            for sublist in method_struct["NEIGHBOR_CTLR"]:
-                flatten_neighbor_ctlr.append(sublist)
-            method_struct["NEIGHBOR_CTLR"] = flatten_neighbor_ctlr
+            # flatten mnames
+            flatten_mnames = []
+            for item in mnames:
+                flatten_mnames.extend(item)
 
-            # MARK KEEP METHODS NESTED CLASSIFIED
-            print(f"NEIGHBOR_CTLR finished")
-            """
+            # FLATTEN METHODS
+            flatten_methods = []
+            for m in method_struct["METHODS"]:
+                flatten_methods.extend(m)
+            method_struct["METHODS"] = flatten_methods
+
+            print("=== METHOD ID -> IDX CTLR ========")
+            for i, defid in enumerate(flatten_mnames):
+                print(f"{i} - {defid}")
+            print("==================================")
+
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.method_layer | handler_line=1797 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.method_layer: {e}")
             print("Err method_layer", e)
         print(f"method_layer... done")
         return method_struct
 
 
     def set_eq_operator_ctlr(self, modules):
-        # print("method_layer compilation...")
         """
         Set eq operator ctlr for the Guard workflow.
 
@@ -1276,7 +1257,7 @@ class Guard(
         print("set_edge_db_to_method...")
         # todo for field index includ again
         mlen = len(modules)-1
-        import json
+
 
         # db out gnn
         db_to_method = {
@@ -1319,16 +1300,15 @@ class Guard(
             for mid, module in modules:
                 if "GHOST" in mid.upper(): continue
                 m_idx = module.get("module_index")
-                #print("set_edge_db_to_method... working", mid)
 
                 methods = self.g.get_neighbor_list_rel(
                     trgt_rel="has_method",
                     node=mid,
                     as_dict=True,
                 )
-
+                print(f"mid {mid} has methods {len(methods)}")
                 if not methods:
-                    #print("set_edge_db_to_method... len methods 0")
+                    print("set_edge_db_to_method... len methods 0")
                     continue
 
                 if m_idx is None:
@@ -1346,10 +1326,12 @@ class Guard(
                         global_eq_idx = method_offsets_by_module_index.get(m_idx, 0) + eq_idx
                         EQ_AMOUNT_VRIATIONS = 0
 
+                        # VALIDATE PARAM
                         params = eqattrs.get("params", [])
                         if isinstance(params, str):
                             params = json.loads(params) if params else []
                         if params is None or not isinstance(params, list):
+                            print("params unsupported format", type(params))
                             params = []
 
                         params_origin = eqattrs.get("origin", [])
@@ -1358,11 +1340,6 @@ class Guard(
                         if not params_origin:
                             params_origin = [""] * len(params)
 
-                        if params_origin is None:
-                            params_origin = [
-                                ""
-                                for _ in range(len(params))
-                            ]
 
                         for fidx, (fid, fattrs) in enumerate(fields):
                             field_index = fattrs["field_index"]
@@ -1370,17 +1347,13 @@ class Guard(
 
                             keys = fattrs.get("keys", [])
                             if isinstance(keys, str):
-                                keys = json.loads(keys) if keys else []
-                            fattrs["keys"] = keys
-
-                            if isinstance(keys, str):
                                 keys = json.loads(keys)
+                            fattrs["keys"] = keys
 
                             fneighbors = self.g.get_neighbor_list_rel(
                                 node=fid,
                                 trgt_rel="has_finteractant",
                             )
-
 
                             # todo if 3 (or more) identical keys include dict field, bool - map
                             worked_params = {}
@@ -1394,13 +1367,12 @@ class Guard(
 
                                 param_collector = []
                                 param_origin_key_collector = []
-                                #print("work pid", pid)
+                                print("work pid", pid)
 
                                 # Field's own param
-                                is_prefixed = pid.endswith("_")
-                                is_self_prefixed = pid.startswith("_")
                                 is_prev_pre = pid.startswith("prev_")
                                 is_prev_after = pid.endswith("_prev")
+                                is_self_prefixed = pid.startswith("_")
 
                                 # rm _ before and after
                                 filtered_key = clean_underscores_front_back(
@@ -1409,57 +1381,21 @@ class Guard(
 
                                 final_key = rm_prev_mark(filtered_key)
 
-                                # is_double_after_marked = pid.endswih("__")
-
-                                EXCLUDED_ORIGINS = ["neighbor", "interactant"]
-
                                 # PRE CHECK METHOD PARAM ORIGINS
-                                is_fields_method = self.is_field_method(
-                                    method_params=params,
-                                    ikeys=keys,
-                                    fneighbors=fneighbors
+                                is_self_param:bool = self.self_param(
+                                    current_param=final_key,
+                                    self_field_params=keys,
                                 )
-                                if not is_fields_method:
-                                    continue
 
-                                if (
-                                    final_key in keys
-                                    and (not is_prefixed or is_self_prefixed)
-                                    and params_origin[pidx] not in EXCLUDED_ORIGINS
-                                    and (
-                                        fid not in worked_params[pid_orig]
-                                        or not is_self_prefixed
-                                        or (is_prev_pre or is_prev_after)
-                                    )
-                                ):
-                                    #print(f"{pid} in {fid}")
 
+                                # SELF PARAM?
+                                if is_self_param is True:
                                     # Add field to param collection
                                     worked_params[pid_orig].append(fid)
 
-                                    time_dim = None
-
-                                    # RM start "_"
-                                    if is_prev_pre:
-                                        #print("prev etected:", pid)
-                                        # _prev must be in keys!!!
-                                        pid = pid.replace("prev_","").strip()
-
-                                        time_dim = 1
-                                    elif is_prev_after:
-                                        pid = pid.replace("_prev","").strip()
-                                        time_dim = 1
-
-                                    elif is_self_prefixed:
-                                        pid = pid[1:]
-
-                                    # directly sort in param arrays
-                                    if time_dim is None:
-                                        time_dim = 0
-
-
-                                    # todo problem: params of method apply to field keys
-                                    # A: SMManager: params liked tomodule not in field (for each) append to it -> how infer type? scale to nDim struct?
+                                    time_dim = self.get_time_dim(
+                                        is_prev_pre, is_prev_after, is_self_prefixed,
+                                    )
 
                                     pindex = keys.index(final_key)
 
@@ -1567,14 +1503,12 @@ class Guard(
                             expand_field_eq_variation_struct = expand_structure(
                                 struct=field_eq_param_struct
                             )
-                            print("expand_field_eq_variation_struct", len(expand_field_eq_variation_struct), expand_field_eq_variation_struct)
+                            print(f"expand_field_eq_variation_struct for {eqid}", len(expand_field_eq_variation_struct), expand_field_eq_variation_struct)
                             param_struct = {}
                             for key, value in zip(params, expand_field_eq_variation_struct):
                                 param_struct[key] = value
 
                             #db_to_method["VARIATION_INDICES"][m_idx].append(param_struct)
-
-
 
                             # extend variation single eq
                             for item in expand_field_eq_variation_struct:
@@ -1600,6 +1534,7 @@ class Guard(
                         ][m_idx].append(EQ_AMOUNT_VRIATIONS)
                     except Exception as e:
                         print("Err set_edge_db_to_method", e, eqid)
+
             flatten_variations = []
             for i, item in enumerate(db_to_method["DB_TO_METHOD_EDGES"]):
                 flatten_variations.extend(item)
@@ -1618,61 +1553,35 @@ class Guard(
 
             print("set_edge_db_to_method... done")
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.set_edge_db_to_method | handler_line=2297 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.set_edge_db_to_method: {e}")
             print(f"Err set_edge_db_to_method: {e}")
             raise
         return db_to_method
 
-
-    def is_field_method(
-            self,
-            method_params,
-            ikeys,
-            fneighbors,
-    ):
-        """
-        Is field method for the Guard workflow.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `method_params`, `ikeys`, `fneighbors`.
-        2. Builds intermediate state such as `self_param`, `self_all_param`, `interactant_param` before applying the main logic.
-        3. Branches on validation or runtime state to choose the next workflow path.
-        4. Delegates side effects or helper work through `print()`, `any()`, `all()`.
-        5. Returns the assembled result to the caller.
-
-        Inputs:
-        - `method_params`: Caller-supplied value used during processing.
-        - `ikeys`: Caller-supplied value used during processing.
-        - `fneighbors`: Caller-supplied value used during processing.
-
-        Returns:
-        - Returns the computed result for the caller.
-        """
-        print("is_field_method...")
-        try:
-            # CHECK IS PARAM IN FIELD KEYS OR INTERACTANT?
-            self_param: bool = any(pid in ikeys for pid in method_params)
-            self_all_param: bool = all(pid in ikeys for pid in method_params)
-            interactant_param = False
-            # CHAR: fneighbors is dict {fid: fattrs} — iterate .values() to get attrs
-            for fid, fattrs in fneighbors:
-                if fattrs:
-                    fikeys = fattrs.get("keys") if isinstance(fattrs, dict) else []
-                    if fikeys and any(pid in fikeys for pid in method_params):
-                        interactant_param = True
-                        break
-            if (self_param and interactant_param) or self_all_param:
-                print("is_field_method: true")
-                return True
-        except Exception as e:
-            print("Err is_field_method:", e)
-        print("is_field_method: false")
-        return False
+    def self_param(self, self_field_params, current_param):
+        external_param:bool = current_param.endswith("_")
+        in_self_params:bool = current_param in self_field_params
+        is_self_prefixed = current_param.startswith("_")
+        if external_param is True:
+            print(f"{current_param} in xternal field")
+            return False
+        elif in_self_params is True or is_self_prefixed:
+            print(f"{current_param} in self field")
+            return True
 
 
 
+    def get_time_dim(self, is_prev_pre, is_prev_after, is_self_prefixed):
+        time_dim = None
 
+        if is_prev_pre:
+            time_dim = 1
+        elif is_prev_after:
+            time_dim = 1
+
+        # directly sort in param arrays
+        if time_dim is None:
+            time_dim = 0
+        return time_dim
 
 
     def set_iterator_from_humans(self):
@@ -1820,15 +1729,6 @@ class Guard(
 
 
     def sync_field_keys_from_methods(self, dims: int = None):
-        # Implement a method within Guard that collects all keys for each field summed in each module,
-        # -> collects all params incl return_key of each method per module
-        # -> checks which keys in fields does not exist
-        # -> adds the key to the keys list of each modules specific field neighbor and applies a default value
-        # (list[0 for _ in range(dims)], axis_def of 0 to the field)
-        """
-        Sync field keys from method params and return_key. Adds missing keys to each module's field
-        neighbors with default value [0]*dims and axis_def=0.
-        """
         print("sync_field_keys_from_methods...")
         try:
             # Resolve dims from ENV node or default
@@ -1868,8 +1768,6 @@ class Guard(
                         try:
                             params = json.loads(params) if params else []
                         except json.JSONDecodeError:
-                            print("Err cor.qbrain.cor.guard::Guard.sync_field_keys_from_methods | handler_line=2535 | json.JSONDecodeError handler triggered")
-                            print("[exception] cor.qbrain.cor.guard.Guard.sync_field_keys_from_methods: caught json.JSONDecodeError")
                             params = []
                     if params is None or not isinstance(params, list):
                         params = []
@@ -1904,8 +1802,6 @@ class Guard(
                         try:
                             axis_def = json.loads(axis_def) if axis_def else []
                         except json.JSONDecodeError:
-                            print("Err cor.qbrain.cor.guard::Guard.sync_field_keys_from_methods | handler_line=2568 | json.JSONDecodeError handler triggered")
-                            print("[exception] cor.qbrain.cor.guard.Guard.sync_field_keys_from_methods: caught json.JSONDecodeError")
                             axis_def = []
                     # Pad axis_def to match keys length if needed
                     while len(axis_def) < len(keys):
@@ -1928,8 +1824,6 @@ class Guard(
                         "axis_def": axis_def,
                     })
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.sync_field_keys_from_methods | handler_line=2591 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.sync_field_keys_from_methods: {e}")
             print("Err sync_field_keys_from_methods", e)
         print("sync_field_keys_from_methods... done")
 
@@ -2002,8 +1896,6 @@ class Guard(
                         user_id
                     )
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.create_actor | handler_line=2664 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.create_actor: {e}")
             print("Ray not accessible:", e)
 
 
@@ -2162,68 +2054,13 @@ if __name__ == "__main__":
 
 
 """
-set dynamic interactants 
-    def classify_equation(self):
-        for k, v in self.g.G.nodes(data=True):
-            if v["type"] == "MODULE":
-
-                eq_neighbors = self.g.get_neighbor_list(
-                    node=k,
-                    target_type=" ",
-                    just_ids=False
-                )
-
-
-
-
-                # GET EQS OF M
-                eq_neighbors = self.g.get_neighbor_list(
-                    node=k,
-                    target_type="EQUATION",
-                    just_ids=False
-                )
-                for eqid, atrrs in eq_neighbors.items():
-                    # GET PARAMS OF EQ
-                    fields = self.g.get_neighbor_list(
-                        node=eqid,
-                        target_type="FIELD",
-                        just_ids=True
-                    )
-
-                    # get eq_params
-                    eq_params = self.g.get_neighbor_list(
-                        node=eqid,
-                        target_type="PARAM",
-                        just_ids=True
-                    )
-
-
-                    if len(fields) > 1:
-                        # differntial equation
-                        self.
-                    # loop eq neighbor fields
-                    for fid, fattrs in fields.items():
-                        self.g.get_neighbor_list(
-                            node=eqid,
-                            target_type="FIELD",
-                            just_ids=True
-                        )
-
-                        # get field parent module
-                        parend_module:str = self.g.get_neighbor_list(
-                            node=eqid,
-                            target_type="MODULE",
-                            just_ids=True
-                        )[0]
-
-                        if parent_module != k:
-                            # SEPPARATE MODULE
-
-
-                if len(neighbors) > 1:
-
-
-                else:
-
-
+(
+final_key in keys
+and (not is_prefixed or is_self_prefixed)
+and params_origin[pidx] not in EXCLUDED_ORIGINS
+and (
+fid not in worked_params[pid_orig]
+or not is_self_prefixed
+or (is_prev_pre or is_prev_after)
+)
 """

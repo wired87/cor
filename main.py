@@ -27,6 +27,7 @@ from injector import Injector
 
 from qfu.qf_utils import QFUtils
 from sm_manager.sm_manager import SMManager
+from jax_test.guard import JaxGuard
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _REPO_ROOT not in sys.path:
@@ -197,6 +198,9 @@ def visualize():
                 )
 
 def run_main_process(
+    amount_nodes: int,
+    sim_time: int,
+    dims: int,
     injection_cfg: dict[
         str,  # field
         list[tuple[tuple[int],  # pos
@@ -204,14 +208,8 @@ def run_main_process(
         ]]
     ] = None,
     output_dir: Optional[str] = None,
-    amount_nodes: Optional[int] = None,
-    sim_time: Optional[int] = None,
-    dims: Optional[int] = None,
-    user_id: int = 1,
+    user_id: int = "public",
 ) -> Dict[str, Any]:
-    from jax_test.guard import JaxGuard
-
-
     _step(
         "run_main_process.start",
         output_dir=output_dir,
@@ -222,38 +220,20 @@ def run_main_process(
         has_injection=bool(injection_cfg),
     )
 
-    # gien: workflow should be resilient — never crash the process on missing optional deps.
-    if amount_nodes is not None:
-        os.environ["AMOUNT_NODES"] = int(amount_nodes)
-    else:
-        os.environ.setdefault("AMOUNT_NODES", "4")
-
-    if sim_time is not None:
-        os.environ["SIM_TIME"] = int(sim_time)
-    else:
-        os.environ.setdefault("SIM_TIME", "1")
-
-    if dims is not None:
-        os.environ["DIMS"] = str(int(dims))
-    else:
-        os.environ.setdefault("DIMS", "3")
-
-
     # Build G
     g = GUtils()
     qfu = QFUtils(G=g.G)
-    injector = Injector(g, int(os.environ["AMOUNT_NODES"]))
+    injector = Injector(g, amount_nodes)
 
+    # DEFAULT INJECTION PATTERN
+    fields = ["ELECTRON", "PHOTON"]
     if injection_cfg is None:
-        # DEFAULT INJECTION PATTERN
         injection_cfg = injector.rainbow(
-            sim_time=int(os.environ["SIM_TIME"]),
-            amount_nodes=int(os.environ["AMOUNT_NODES"]),
-            fields=["ELECTRON", "PHOTON"],
-            dims=int(os.environ["DIMS"]),
+            sim_time,
+            amount_nodes,
+            fields,
+            dims,
         )
-    else:
-        raise ValueError("Inj mus tb set")
 
     # BUILD SM
     _step("workflow.graph.initialize.start")
@@ -262,32 +242,27 @@ def run_main_process(
         g=g,
         qf=qfu
     )
-    print("Status G SM")
-    g.print_status_G()
 
     # INCLUDE INJECTIONS
     injector.set_inj_pattern(
         inj_struct=injection_cfg
     )
-    print("Status G Inj")
-    g.print_status_G()
 
-    components = CG(qfu, g, user_id=user_id, injector=injector).main()
-    print("Status G CFG")
-    g.print_status_G()
-
-    # SIM WORKFLOW
-    _step("jax.run.start")
+    components = CG(amount_nodes, sim_time, dims, qfu, g, user_id=user_id, injector=injector).main()
 
     jax_guard = JaxGuard(cfg=components).main()
 
     result = {
         "ok": True,
         "jax_ok": jax_guard is not None,
-        "user_id": int(user_id),
+        "user_id": user_id,
     }
     return result
 
 if __name__ == "__main__":
-    run_main_process()
+    run_main_process(
+        amount_nodes=3,
+        sim_time=3,
+        dims=3,
+    )
 

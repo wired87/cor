@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import pprint
 from typing import Any, Dict, List
 
 import jax.numpy as jnp
@@ -59,11 +60,12 @@ class JaxGuard:
         jax.config.update("jax_platform_name", platform)  # must be run before jnp
         self.gpu = jax.devices(platform)[0]
 
-        self.cfg=cfg
-
-        AMOUNT_NODES = int(os.getenv("AMOUNT_NODES"))
-        SIM_TIME = int(os.getenv("SIM_TIME"))
-        DIMS = int(os.getenv("DIMS"))
+        self.cfg = cfg
+        print("cfg:")
+        pprint.pp(cfg)
+        AMOUNT_NODES = int(self.cfg.get("AMOUNT_NODES"))
+        SIM_TIME = int(self.cfg.get("SIM_TIME"))
+        DIMS = int(self.cfg.get("DIMS"))
 
         for k, v in self.cfg.items():
             self.cfg[k] = parse_value(v)
@@ -74,10 +76,7 @@ class JaxGuard:
 
         # layers
         self.gnn_layer = GNN(
-            amount_nodes=AMOUNT_NODES,
-            time=SIM_TIME,
             gpu=self.gpu,
-            DIMS=DIMS,
             **self.cfg
         )
 

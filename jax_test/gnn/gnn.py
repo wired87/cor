@@ -20,27 +20,19 @@ class GNN:
 
     def __init__(
             self,
-            amount_nodes,
-            time: int,
             gpu,
-            DIMS,
             **cfg,
     ):
-        # DB_TO_METHOD_EDGES
-        # METHOD_PARAM_LEN_CTLR
-        # METHOD_SHAPES
         for k, v in cfg.items():
             setattr(self, k, v)
 
         self.model_feature_dims = 64
 
-        self.time = time
-        self.amount_nodes = amount_nodes
 
         # Generate grid coordinates based on amount_nodes dimensionality
         self.schema_grid = [
             (i, i, i)
-            for i in range(amount_nodes)
+            for i in range(getattr(self, "AMOUNT_NODES"))
         ]
         self.len_params_per_methods = {}
         self.change_store = []
@@ -49,9 +41,7 @@ class GNN:
 
         # todo use runnable (after first versionnis deplyoed - currently just shcmatic)
         self.db_layer = DBLayer(
-            amount_nodes=amount_nodes,
             gpu=self.gpu,
-            DIMS=DIMS,
             **cfg
         )
 
@@ -67,8 +57,6 @@ class GNN:
 
         self.injector = InjectorLayer(
             db_layer=self.db_layer,
-            amount_nodes=amount_nodes,
-            DIMS=DIMS,
             **cfg
         )
 
@@ -112,20 +100,18 @@ class GNN:
     def prepare(self):
         # DB
         self.db_layer.build_db(
-            self.amount_nodes,
+            getattr(self, "AMOUNT_NODES"),
         )
-
         # layer to define all ax et
         self.prep()
 
-    # ---------- Engine: simulation loop (Python loop; for JAX-traced version see engine_components.run_simulation_scan) ----------
     def simulate(self):
         try:
-            for step in range(self.time):
+            for step in range(getattr(self, "SIM_TIME")):
                 jax.debug.print(
                     "Sim step {s}/{n}",
                     s=step,
-                    n=self.time
+                    n=getattr(self, "SIM_TIME")
                 )
 
                 if hasattr(self, "feature_encoder"):
@@ -141,15 +127,6 @@ class GNN:
                     all_results,
                 )
 
-                # LIVE_DATA: send current time_db[0] as dict[keys, shaped_param] (throttled by VIS_FPS)
-                send_live = getattr(self, "_send_live", None)
-                if callable(send_live):
-                    try:
-                        send_live(self, step)
-                    except Exception as _e:
-                        print("Err _send_live:", _e)
-
-                # todo just save what has changed - not the entire array
         except Exception as e:
             print(f"Err simulate: {e}")
 
@@ -206,6 +183,8 @@ class GNN:
         return idx
 
     def reshape_variant_block(self, edges, total_amount_params_current_eq, amount_params_current_eq):
+        # to split edges into n parts
+
         result = edges.reshape(
             total_amount_params_current_eq // amount_params_current_eq,
             amount_params_current_eq,
@@ -223,7 +202,7 @@ class GNN:
             variations = self.reshape_variant_block(
                 variations,
                 total_amount_params_current_eq,
-                amount_params_current_eq,
+                amount_params_current_eq#eq_idx
             )
 
             examle_variation = variations[0]
@@ -259,8 +238,7 @@ class GNN:
                 [[] for _ in range(num_in_params)]
             )
 
-            # --- Out-features: one Linear per (eq, param_out, feature) ---
-            # extract coords -> get data (!transformed) -> gen features ->
+
             self.create_out_linears_process(
                 eq_idx,
             )
@@ -323,31 +301,13 @@ class GNN:
         print("create_in_linears_process... done")
 
     def create_node(self, eq_struct, eq_idx) -> Node:
-        neighbor_ctlr = getattr(self, "NEIGHBOR_CTLR", None)
-        neighbor_val_item = (
-            neighbor_ctlr[eq_idx] if neighbor_ctlr is not None and eq_idx < len(neighbor_ctlr)
-            else None
-        )
-
         runnable = create_runnable(eq_struct)
 
         node = Node(
             axis=self.all_axs[eq_idx],
             runnable=runnable,
             amount_variations=len(self.LEN_FEATURES_PER_EQ[eq_idx]),
-            neighbor_val_item=neighbor_val_item,
         )
-
-        # make all diff axs None since in method we apply batch
-        diff_adapted_axis_def = self.all_axs[eq_idx]
-        for idx in self.all_axs[eq_idx]:
-            self.all_axs[eq_idx][idx] = None
-
-        self.all_axs[eq_idx] = diff_adapted_axis_def
-
-        if neighbor_ctlr[eq_idx] is not None:
-            node.neighbor_diff_axis_def = self.all_axs[eq_idx]
-
         return node
 
     def calc_batch(self):
@@ -367,15 +327,15 @@ class GNN:
             # # # #
             # a b
             # 1 2
-            variations, amount_params_current_eq, scaled_amount_params_all_variatons = self.extract_eq_variations(
+            variations, param_len, scaled_amount_params_all_variatons = self.extract_eq_variations(
                 eq_idx,
             )
 
             #
             variations = self.reshape_variant_block(
                 variations,
-                total_amount_params_current_eq,
-                amount_params_current_eq,
+                scaled_amount_params_all_variatons,
+                param_len#eq_idx
             )
 
             # transform shape along vertical ax
@@ -406,17 +366,19 @@ class GNN:
                 axis_def=axis_def,
             )
 
-            high_score_elements = self.feature_encoder.get_precomputed_results(
-                features_tree,
-                axis_def,
-                eq_idx,
-            )
-
             # reshape flattened batch values (needed to get node batch size)
             inputs = self.shape_input(
                 eq_idx,
                 flatten_transformed,
             )
+
+            """
+            high_score_elements = self.feature_encoder.get_precomputed_results(
+                features_tree,
+                axis_def,
+                #eq_idx,
+            )
+
             # Node vmap batch size = size of mapped axis; use max over batched (axis-0) inputs.
             batch_size = 0
             if inputs and axis_def is not None:
@@ -426,7 +388,6 @@ class GNN:
             if batch_size == 0 and inputs:
                 batch_size = int(inputs[0].shape[0]) if hasattr(inputs[0], "shape") else 0
 
-            # One blur result per variation row; len_variations = batch_size so vmap sizes match.
             if not high_score_elements or batch_size == 0:
                 _blur = jnp.full((max(1, batch_size), self.feature_encoder.d_model), jnp.nan)
             else:
@@ -436,12 +397,14 @@ class GNN:
                     batch_size,
                 )
             ### ###
+            """
 
             # calc single equation
             results = node(
                 unprocessed_in=inputs,
-                precomputed_grid=_blur,
+                precomputed_grid=None,
                 in_axes_def=axis_def,
+                eq_idx=eq_idx,
             )
 
             # --- FIX: Out-features need one segment per out_linear; vmap fails if flatten_out length != len(out_linears) ---
@@ -587,51 +550,35 @@ class GNN:
         print("shape_input... done")
         return inputs
 
+
     def extract_eq_variations(self, eq_idx):
         """
-        infer metho variation start + len = end
-
+        infer method variation: linear layout — block i has length V[i]*P[i], concatenated.
         """
         jax.debug.print("extract_eq_variations ")
-        print("self.METHOD_PARAM_LEN_CTLR", self.METHOD_PARAM_LEN_CTLR)
         print("self.DB_CTL_VARIATION_LEN_PER_EQUATION", self.DB_CTL_VARIATION_LEN_PER_EQUATION)
+        print("self.METHOD_PARAM_LEN_CTLR", self.METHOD_PARAM_LEN_CTLR)
+        v = jnp.array(self.DB_CTL_VARIATION_LEN_PER_EQUATION, dtype=jnp.int64)
+        p = jnp.array(self.METHOD_PARAM_LEN_CTLR, dtype=jnp.int64)
+        per_block = v * p
+        offset_starts = jnp.concatenate([jnp.array([0]), jnp.cumsum(per_block)])
 
+        offset_start = int(offset_starts[eq_idx])
+        offset_len = int(per_block[eq_idx])
 
-        #
-        offsets_variaitons_start = jnp.concatenate([
-            jnp.array([0]),
-            jnp.cumsum(jnp.array(self.DB_CTL_VARIATION_LEN_PER_EQUATION))
-        ])[eq_idx]
-        offsets_param_start = jnp.concatenate([
-            jnp.array([0]),
-            jnp.cumsum(jnp.array(self.METHOD_PARAM_LEN_CTLR))
-        ])[eq_idx]
-
-        offset_start = offsets_variaitons_start * offsets_param_start
         print("offsets", offset_start)
+        print("offset_len", offset_len)
 
-        #
-        offsets_variaitons_end = jnp.cumsum(jnp.array(self.DB_CTL_VARIATION_LEN_PER_EQUATION))[eq_idx]
-        offsets_param_end = jnp.cumsum(jnp.array(self.METHOD_PARAM_LEN_CTLR))[eq_idx]
-        offset_end = offsets_variaitons_end * offsets_param_end
-        offset_len = int(offset_end - offset_start)
-
-        # to split edges into n parts
-        amount_params_current_eq = jnp.take(
-            jnp.array(self.METHOD_PARAM_LEN_CTLR),
-            eq_idx,
-        )
-
-        print("amount_params_current_eq", amount_params_current_eq)
-
-        # GET EDGES (db2m) SINGLE VARIATION
         edges = jax.lax.dynamic_slice_in_dim(
             jnp.array(self.DB_TO_METHOD_EDGES),
             offset_start,
             offset_len,
         )
         print("extract_eq_variations... done")
-        return edges, amount_params_current_eq, offset_len
+        # prep erwartet drei Werte: Zeilen-Block, Param-Anzahl, gleich |reshape|-Flattotal
+        amount_params = int(p[eq_idx])
+        total_rows = offset_len
+        return edges, amount_params, total_rows
 
     def serialize(self, data):
         import flax.serialization
@@ -902,3 +849,44 @@ _blur = self.feature_encoder.get_precomputed_results(
 
 
 )"""
+
+
+def extract_eq_variations(self, eq_idx):
+    """
+    infer metho variation start + len = end
+    """
+    jax.debug.print("extract_eq_variations ")
+
+    #
+    offsets_variaitons_start = jnp.concatenate([
+        jnp.array([0]),
+        jnp.cumsum(jnp.array(self.DB_CTL_VARIATION_LEN_PER_EQUATION))
+    ])[eq_idx]
+
+    #
+    offsets_param_start = jnp.concatenate([
+        jnp.array([0]),
+        jnp.cumsum(jnp.array(self.METHOD_PARAM_LEN_CTLR))
+    ])[eq_idx]
+
+    #
+    offset_start = offsets_variaitons_start * offsets_param_start
+    print("offsets", offset_start)
+
+    #
+    offsets_variaitons_end = jnp.cumsum(jnp.array(self.DB_CTL_VARIATION_LEN_PER_EQUATION))[eq_idx]
+    offsets_param_end = jnp.cumsum(jnp.array(self.METHOD_PARAM_LEN_CTLR))[eq_idx]
+    offset_end = offsets_variaitons_end * offsets_param_end
+
+    #
+    offset_len = int(offset_end - offset_start)
+    print("offset_len", offset_len)
+
+    #
+    edges = jax.lax.dynamic_slice_in_dim(
+        jnp.array(self.DB_TO_METHOD_EDGES),
+        offset_start,
+        offset_len,
+    )
+    print("extract_eq_variations... done")
+    return edges, offset_len

@@ -11,8 +11,6 @@ class InjectorLayer:
             INJECTOR_INDICES,
             INJECTOR_VALUES,
             db_layer,
-            DIMS,
-            amount_nodes,
             **cfg
     ):
         self.time = INJECTOR_TIME
@@ -21,8 +19,8 @@ class InjectorLayer:
 
         self.db_layer=db_layer
 
-        self.amount_nodes=amount_nodes
-        self.DIMS=DIMS
+        self.amount_nodes=cfg["AMOUNT_NODES"]
+        self.DIMS=cfg["DIMS"]
 
 
     def transfrom_injections_indices(self):

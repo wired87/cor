@@ -8,4 +8,3 @@ cd ..
 
 git remote -v
 
-git init && git add . && git commit -m "hi" && git remote add gdb https://github.com/wired87/gdb_manager && git push gdb master && cd ..

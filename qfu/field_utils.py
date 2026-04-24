@@ -143,6 +143,7 @@ class FieldUtils:
         self.parameters = {
             "o_operators": self.o_operators,
             "gamma": self.gamma,
+            "gamma_0": self.gamma_0,
             "T": self.T,
             "gamma0_inv": self.gamma0_inv,
             "minkovski_tensor": self.mt,

@@ -1,5 +1,7 @@
 from numpy import stack
 
+import jax.numpy as jnp
+import jax
 
 def calc_psi_bar(psi, gamma_0):
     # Dirac Adjoint: ψ_bar = ψ†γ⁰
@@ -19,7 +21,13 @@ def calc_psi_bar(psi, gamma_0):
     Returns:
     - Returns the computed result for the caller.
     """
-    psi_bar = psi.conj().T @ gamma_0
+
+    psi_bar = jax.vmap(
+        lambda p, g: jnp.einsum("i,ij->j", p.conj(), g),
+        in_axes=(0, None),
+    )(psi, gamma_0)
+
+    #psi_bar = psi.conj().T @ gamma_0
     return psi_bar
 
 def calc_yukawa_coupling(y, psi_bar, psi, h):

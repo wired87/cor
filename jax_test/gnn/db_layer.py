@@ -7,7 +7,6 @@ from jax import ops
 from jax_test.dtypes import TimeMap
 
 
-
 class DBLayer:
 
     def  __init__(
@@ -25,6 +24,7 @@ class DBLayer:
             FIELDS,
             DB_CTL_VARIATION_LEN_PER_FIELD,
             LEN_FEATURES_PER_EQ,
+            SIM_TIME,
             **cfg
     ):
         # DB Load and parse
@@ -32,10 +32,14 @@ class DBLayer:
 
         self.AXIS = AXIS
 
+        self.SCALED_PARAMS = []
+        self.nodes = []
+
         self.AMOUNT_PARAMS_PER_FIELD = jnp.asarray(
             AMOUNT_PARAMS_PER_FIELD,
             dtype=jnp.int64,
         )
+
         self.DB_PARAM_CONTROLLER = jnp.asarray(DB_PARAM_CONTROLLER, dtype=jnp.int64)
         self.DB_SHAPE = DB_SHAPE
 
@@ -72,7 +76,7 @@ class DBLayer:
         self.OUT_SHAPES, self.OUT_SHAPE_REL_DB_IDX = self.get_shapes(
             coords=self.METHOD_TO_DB
         )
-
+        self.SIM_TIME = SIM_TIME
         self.LEN_FEATURES_PER_EQ = LEN_FEATURES_PER_EQ
         self.gpu = gpu
         self.DIMS = DIMS
@@ -89,58 +93,40 @@ class DBLayer:
 
     def build_db(self, amount_nodes):
         jax.debug.print("build_db...")
-        all_dim_tree_db = []  # one ndarray per dim: canonical per-dim storage
-        time_db_by_dim = []  # list of list of arrays: one list per dim, same layout as extended DB
-        # TIME_DB = []
-        self.SCALED_PARAMS = []
         ndims = int(jnp.ravel(self.DIMS)[0]) if hasattr(self.DIMS, "ravel") else int(self.DIMS)
         try:
-            for dim in range(ndims):
-                SCALED_DB_dim = []
-                TIME_DB_dim = []
-                for i, ax in enumerate(self.AXIS):
-                    start_param_count = jnp.take(
-                        self.DB_PARAM_CONTROLLER_CUMSUM,
-                        i,
-                    )
-                    len_unscaled_param = jnp.int64(
-                        self.DB_PARAM_CONTROLLER[i]
-                    )
-                    single_param_value = jax.lax.dynamic_slice_in_dim(
-                        self.DB,
-                        start_param_count,
-                        len_unscaled_param,
-                    )
-                    if ax == 0:
-                        slice = jnp.tile(
-                            single_param_value,
-                            amount_nodes,
-                        )
-                        SCALED_DB_dim.extend(slice)
-                        TIME_DB_dim.append(jnp.array([slice]))
-                        self.SCALED_PARAMS.append(len(slice))
-                    else:
-                        SCALED_DB_dim.extend(single_param_value)
-                        TIME_DB_dim.append(jnp.array([single_param_value]))
-                        self.SCALED_PARAMS.append(len_unscaled_param)
-                db_dim = jnp.array(SCALED_DB_dim, dtype=jnp.int64)
-                all_dim_tree_db.append(db_dim)
-                time_db_by_dim.append(TIME_DB_dim)
+            for i, ax in enumerate(self.AXIS):
+                start_param_count = jnp.take(
+                    self.DB_PARAM_CONTROLLER_CUMSUM,
+                    i,
+                )
 
-            # Flatten time DB to same layout as extended DB: [dim0_ax0, dim0_ax1, ..., dim1_ax0, ...]
-            TIME_DB = [arr for dim_list in time_db_by_dim for arr in dim_list]
-            self.time_db_by_dim = time_db_by_dim  # collector struct: per-dim list of arrays
-            self.tree_db = all_dim_tree_db  # canonical per-dim ndarrays
+                len_unscaled_param = jnp.int64(
+                    self.DB_PARAM_CONTROLLER[i]
+                )
+
+                single_param_value = jax.lax.dynamic_slice_in_dim(
+                    self.DB,
+                    start_param_count,
+                    len_unscaled_param,
+                )
+
+                if ax == 0:
+                    slice = jnp.tile(
+                        single_param_value,
+                        amount_nodes * ndims, # STORE GRID 1d
+                    )
+                    self.nodes.extend(slice)
+                    self.SCALED_PARAMS.append(len(slice))
+                else:
+                    self.nodes.extend(single_param_value)
+                    self.SCALED_PARAMS.append(len_unscaled_param)
 
         except Exception as e:
             print("Err build_db", e)
-            TIME_DB = []
-            tree_db = []
-            self.time_db_by_dim = []
-            self.all_dim_tree_db = []
 
-        # CONCATENATE = MERGE TO SINGLE ARRAY
-        self.nodes = jnp.concatenate(all_dim_tree_db)
+        self.nodes = jnp.array(self.nodes)
+
         self.SCALED_PARAMS = jnp.array(self.SCALED_PARAMS)
 
         self.SCALED_PARAMS_CUMSUM = jnp.concatenate([
@@ -156,9 +142,10 @@ class DBLayer:
             jnp.cumsum(self.DB_PARAM_CONTROLLER)
         ])
 
-        # Extended DB layout: slot index = dim * len(AXIS) + axis_idx (same for nodes, SCALED_PARAMS, TIME_DB)
+        #
+        self.tdb = [self.nodes if i == 0 else [] for i in range(self.SIM_TIME)]
         self.tdb = jax.device_put(
-            TIME_DB,
+            self.tdb,
             self.gpu,
         )
 
@@ -168,16 +155,16 @@ class DBLayer:
                 self.nodes,
             ]
         )
+
         #
         self.time_construct = jax.device_put(
             self.time_construct,
-            self.gpu,
+            self.gpu
         )
+
         #
         self.out_shapes_sum = []
         jax.debug.print("build_db... done")
-
-
 
 
     def stack_tdb(self, sumed_results):
@@ -245,33 +232,19 @@ class DBLayer:
         try:
             jax.debug.print(f"save_t_step...")
 
-            try:
-                all_results = self.flatten_result(all_results)
-            except Exception as e0:
-                print("Err save_t_step (flatten_result):", e0)
-                return all_results
-            try:
-                sumed_results = self.sum_results(all_results)
-            except Exception as e1:
-                print("Err save_t_step (sum_results):", e1)
-                return all_results
+            all_results = self.flatten_result(all_results)
+
+            sumed_results = self.sum_results(all_results)
+
             sumed_results = jnp.ravel(jnp.asarray(sumed_results, dtype=jnp.float32))
             self.time_construct = self.time_construct.at[1].set(self.time_construct[0])
-            try:
-                self.stack_tdb(sumed_results)
-            except Exception as e2:
-                print("Err save_t_step (stack_tdb):", e2)
-                return all_results
-            try:
-                self.sort_results_rtdb(sumed_results)
-            except Exception as e_rtdb:
-                print("Err sort_results_rtdb (skipping this step):", e_rtdb)
-            # Collect per-parameter time series (values + features) on CPU side.
-            try:
-                self._update_param_time_series(sumed_results)
-            except Exception as e_hist:
 
-                print("Err save_t_step (_update_param_time_series):", e_hist)
+            self.stack_tdb(sumed_results)
+
+            self.sort_results_rtdb(sumed_results)
+
+            self._update_param_time_series(sumed_results)
+
             self.time_construct = self.time_construct.at[0].set(self.nodes)
             jax.debug.print(f"save_t_step... done")
             return all_results
@@ -767,7 +740,7 @@ class DBLayer:
         abs_un_idx = self.get_abs_unscaled_db_idx(coords)
 
         for idx in abs_un_idx:
-            print("abs_un_idx", idx)
+            #print("abs_un_idx", idx)
             shape = self.DB_SHAPE[jnp.array(idx)]
             all_shape.append(shape)
 
@@ -808,28 +781,28 @@ class DBLayer:
         return all_ax, all_shape
 
     def get_rel_db_index(self, mod_idx, field_idx, rel_param_idx):
-        print("get_rel_db_index...", mod_idx, field_idx)
+        #print("get_rel_db_index...", mod_idx, field_idx)
         # PREV FIELDS
         all_fields_preset = jnp.take(
             self.FIELDS_CUMSUM,
-            int(mod_idx),
+            mod_idx,
         )
-        print("all_fields_preset", all_fields_preset)
+        #print("all_fields_preset", all_fields_preset)
 
         # ABS FIELD IDX
         total_fields_idx = all_fields_preset + field_idx
-        print("total_fields_idx", total_fields_idx)
+        #print("total_fields_idx", total_fields_idx)
 
         # PREV PARAMS
         field_param_start_idx = jnp.take(
             self.AMOUNT_PARAMS_PER_FIELD_CUMSUM,
             total_fields_idx
         )
-        print("field_param_start_idx", field_param_start_idx)
+        #print("field_param_start_idx", field_param_start_idx)
 
         abs_unscaled_param_idx = field_param_start_idx + rel_param_idx
-        print("abs_param_idx", abs_unscaled_param_idx)
-        print("get_rel_db_index... done")
+        #print("abs_param_idx", abs_unscaled_param_idx)
+        #print("get_rel_db_index... done")
         return abs_unscaled_param_idx
 
 
@@ -1018,43 +991,3 @@ class DBLayer:
         return jnp.take(scaled_vals, batch)
 
 
-"""
-def stack_tdb(self, sumed_results):
-    print("stack_tdb...")
-    # --- FIX: Write sumed_results into tdb at method indices; avoid vmap(stack_tstep) which
-    # caused "setting an array element with a sequence / inhomogeneous shape". ---
-    # --- FIX: vmap in_axes must match number of arguments; we pass one array so use in_axes=0. ---
-    def get_rel_db_idx(coord):
-        # retrieve db indice for result passing
-        c = jnp.ravel(jnp.asarray(coord))
-        return self.get_rel_db_index(c[-3], c[-2], c[-1])
-    try:
-        idx_map = vmap(get_rel_db_idx, in_axes=0)(self.METHOD_TO_DB)
-        sumed_results = jnp.asarray(sumed_results).ravel()
-        n = idx_map.shape[0]
-        if sumed_results.size >= n:
-            to_set = sumed_results[:n]
-        else:
-            to_set = jnp.concatenate([sumed_results, jnp.zeros(n - sumed_results.size, dtype=sumed_results.dtype)])
-        # --- FIX: tdb may be a list from build_db; use a 1D array for .at[].set(). ---
-        if not hasattr(self.tdb, "at"):
-            size = max(int(jnp.max(jnp.asarray(idx_map))) + 1, n)
-            tdb_arr = jnp.zeros(size, dtype=to_set.dtype)
-        else:
-            tdb_arr = jnp.ravel(jnp.asarray(self.tdb))
-
-        self.tdb = tdb_arr.at[idx_map].set(to_set)
-
-        print("stack_tdb... done")
-    except Exception as e:
-        print("Err stack_tdb", e)
-        
-        
-        
-if (
-    isinstance(all_results, tuple)
-    and len(all_results) == 2
-    and isinstance(all_results[1], list)
-):
-    all_results = all_results[1]
-"""

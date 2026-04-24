@@ -82,7 +82,7 @@ class Injector(
         print("amount", amount)
         print("dim", dim)
         _range = list(product(range(amount), repeat=dim))
-        print("range:", _range)
+        print("range:", len(_range))
         return _range
 
 

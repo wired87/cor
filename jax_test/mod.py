@@ -8,8 +8,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax import vmap, jit
 
-
-from jax_test.utils import DIM, create_runnable, SHIFT_DIRS
+from jax_test.utils import DIM, SHIFT_DIRS
 
 
 class ModuleUtils:
@@ -95,9 +94,13 @@ class Node(nnx.Module):
             unprocessed_in,
             precomputed_grid,
             in_axes_def,
+            eq_idx,
             t=0
     ):
         print("Call step...")
+        print("eq_idx", eq_idx)
+        print("in_axes_def", in_axes_def)
+
         try:
             result = self.core(
                 unprocessed_in,
@@ -181,7 +184,7 @@ class Node(nnx.Module):
 
         def shift_calc(plus, minus):
             #
-        kp1     plus_grid = jnp.roll(
+            plus_grid = jnp.roll(
                 args[neighbor_grid_idx],
                 shift=shift,
                 axis=0

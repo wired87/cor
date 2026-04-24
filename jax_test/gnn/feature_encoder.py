@@ -181,7 +181,7 @@ class FeatureEncoder(eqx.Module):
         --- FIX: Accept list of segments (one per out_linear) and loop; vmap fails when
         axis 0 sizes differ (e.g. flatten_param 36 vs idx 37). ---
         """
-        print("gen_feature_single_variation...")
+        #print("gen_feature_single_variation...")
         #print("param_grid", type(param_grid))
         #print("out_linears", type(out_linears))
 
@@ -227,8 +227,6 @@ class FeatureEncoder(eqx.Module):
                 return jax.nn.gelu(out_linears[idx](flatten_param))
             features = vmap(_work_param, in_axes=(0, 0))(param_grid, idx_map)
         except Exception as e:
-            print(f"Err core.jax_test.gnn.feature_encoder::FeatureEncoder.gen_out_feature_single_variation | handler_line=225 | {type(e).__name__}: {e}")
-            print(f"[exception] core.jax_test.gnn.feature_encoder.FeatureEncoder.gen_out_feature_single_variation: {e}")
             print("Err gen_feature_single_variation", e)
             return jnp.zeros((len(out_linears), self.d_model), dtype=jnp.float32)
         print("gen_feature_single_variation... done")
