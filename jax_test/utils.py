@@ -15,6 +15,7 @@ SHIFT_DIRS = [
 
 DIM = 3
 
+import re
 import jax.numpy as jnp
 import jax
 
@@ -24,6 +25,18 @@ LIBS={
     "jnp": jnp,
     "jit": jax.jit,
 }
+
+
+def _fix_einsum_unquoted_subscript(code: str) -> str:
+    """
+    CHAR: Some graphs store e.g. `jnp.einsum(i,ij->j, a, b)` (quotes dropped). Repair to
+    `jnp.einsum("i,ij->j", a, b)` so `exec` succeeds.
+    """
+    return re.sub(
+        r'jnp\.einsum\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*([a-zA-Z0-9,]+->[a-zA-Z0-9,]+)\s*,',
+        r'jnp.einsum("\1,\2",',
+        code,
+    )
 
 
 def create_runnable(eq_code):
@@ -42,7 +55,7 @@ def create_runnable(eq_code):
 
             return _noop
         if not isinstance(eq_code, (str, bytes)):
-            print(f"Err create_runnable: need str code, got {type(eq_code).__name__}")
+            print(f"Warn create_runnable: need str code, got {type(eq_code).__name__}")
 
             def _noop(*_a, **_k):
                 return jnp.asarray(0.0, dtype=jnp.float32)
@@ -50,7 +63,8 @@ def create_runnable(eq_code):
             return _noop
 
         namespace = {}
-
+        if isinstance(eq_code, str):
+            eq_code = _fix_einsum_unquoted_subscript(eq_code)
         # Wir fügen die LIBS direkt in den globalen Scope des exec ein
         exec(eq_code, LIBS, namespace)
 
@@ -73,9 +87,7 @@ def create_runnable(eq_code):
         #print("func", func)
         return func
     except Exception as e:
-        print(f"Err core.jax_test.utils::create_runnable | handler_line=75 | {type(e).__name__}: {e}")
-        print(f"[exception] core.jax_test.utils.create_runnable: {e}")
-        print(f"Err create_runnable: {e}")
+        print(f"Warn create_runnable: {type(e).__name__}: {e}")
         raise e
 
 

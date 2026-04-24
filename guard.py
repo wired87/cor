@@ -99,10 +99,8 @@ class Guard:
         )
 
         self.cfg_file = cfg_file
-        project_root = os.path.dirname(os.path.dirname(__file__))
-
-        if not os.path.isabs(self.cfg_file):
-            self.cfg_file = os.path.join(project_root, self.cfg_file)
+        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.cfg_file = os.path.join(_repo_root, f"{self.cfg_file}.json")
 
         self.fields = []
         print("Guard Initialized!")
@@ -177,11 +175,21 @@ class Guard:
         )
         print("start_grid_local...")
 
-        with open(self.cfg_file, "w") as f:
-            f.write(json.dumps(components, indent=4))
+        with open(self.cfg_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(components, indent=4, ensure_ascii=False))
         print(f"Guard cfg written to {self.cfg_file}:")
 
-        print("components", components)
+        # CHAR: avoid Windows console cp1252 UnicodeEncodeError on huge `components` print
+        keys = list(components.keys())
+        print(f"components keys ({len(keys)}): {keys}")
+        try:
+            preview = json.dumps(components, ensure_ascii=True, default=str, indent=2)
+            max_len = 12000
+            if len(preview) > max_len:
+                preview = preview[:max_len] + "\n... [truncated]"
+            print("components (ascii preview):\n", preview)
+        except Exception as ex:
+            print("components: could not build preview:", ex)
         print("Guard.main... done")
         return components
 

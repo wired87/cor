@@ -153,7 +153,7 @@ async def _run_route(req: Request) -> Response:
         sim_time=_as_int(sim_spec.get("sim_time")),
         dims=_as_int(sim_spec.get("dims")),
         user_id=int(sim_spec.get("user_id", 1)),
-        injection_file=injection_file,
+        injection_cfg=injection_file,
     )
     return JSONResponse(result)
 
@@ -172,7 +172,7 @@ def run(
         sim_time=_as_int(spec.get("sim_time")),
         dims=_as_int(spec.get("dims")),
         user_id=int(spec.get("user_id", 1)),
-        injection_file=inj,
+        injection_cfg=inj,
     )
 
 

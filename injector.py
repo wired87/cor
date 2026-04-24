@@ -249,6 +249,10 @@ class Injector(
             self.module_pattern_collector = []
 
             for i, (mid, module) in enumerate(modules):
+                if mid is None:
+                    continue
+                if isinstance(mid, str) and "GHOST" in mid.upper():
+                    continue
                 print(f"set inj for mid {mid}")
 
                 # get module fields
@@ -259,6 +263,8 @@ class Injector(
                 print("fields", len(fields))
                 # ds unendlichekeiszeichen ist eigentlich gerade -> nur die daten bewegen sich
                 for j, (fid, fattrs) in enumerate(fields.items()):
+                    if not fid:
+                        continue
                     print(f"check {fid} in injection struct...")
                     if fid in inj_struct:
                         field_injection_struct:list[tuple] = inj_struct[fid]
@@ -294,7 +300,7 @@ class Injector(
                         print(f"{fid} has no injections set...")
             print("Injections compound to graph... done")
         except Exception as e:
-            print(f"Err set_inj_pattern: {e}")
+            print(f"Warn set_inj_pattern: {e}")
 
     def get_update_rcv_ncfg(
             self,

@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-import pprint
+import tempfile
 from typing import Any, Dict, List
 
 import jax.numpy as jnp
@@ -62,7 +62,17 @@ class JaxGuard:
 
         self.cfg = cfg
         print("cfg:")
-        pprint.pp(cfg)
+
+        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.save_path = os.path.join(_repo_root, "local.json")
+
+
+        # CHAR: Windows cp1252 console breaks on raw pprint of unicode in equations
+        try:
+            _s = json.dumps(_to_json_serializable(cfg), ensure_ascii=True, indent=2)
+            print(_s[:12000] + (" ...[truncated]" if len(_s) > 12000 else ""))
+        except Exception as ex:
+            print("cfg (fallback repr):", ex)
         AMOUNT_NODES = int(self.cfg.get("AMOUNT_NODES"))
         SIM_TIME = int(self.cfg.get("SIM_TIME"))
         DIMS = int(self.cfg.get("DIMS"))
@@ -132,16 +142,18 @@ class JaxGuard:
         return send_live
 
     def main(self):
-        self.gnn_layer.main()
-        #results = self.finish()
+        gnn_out = self.gnn_layer.main()
+        if gnn_out is not None and len(gnn_out) >= 2:
+            serialized_in, serialized_out = gnn_out[0], gnn_out[1]
+
+            self._export_engine_state(
+                serialized_in,
+                serialized_out,
+            )
+
+        # results = self.finish()
         print("SIMULATION PROCESS FINISHED")
         return self
-
-
-    def run(self):
-
-        print("run... done")
-
 
 
     def _export_data(self):
@@ -190,27 +202,25 @@ class JaxGuard:
 
 
 
-    def _export_engine_state(self, serialized_in, serialized_out, out_path: str = "engine_output.json"):
+    def _export_engine_state(self, serialized_in, serialized_out):
         """Save all generated engine data (history, db, tdb, etc.) to a local .json file."""
+        #
         dl = self.gnn_layer.db_layer
         try:
             payload = {
                 "serialized_out": _to_json_serializable(base64.b64encode(serialized_out).decode('ascii')),
                 "serialized_in": _to_json_serializable(base64.b64encode(serialized_in).decode('ascii')),
-
-                # CTLR
-                "ENERGY_MAP": None,
             }
+
             if hasattr(dl, "tdb") and dl.tdb is not None:
                 payload["tdb"] = _to_json_serializable(dl.tdb)
 
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, allow_nan=True)
-            print("engine state saved to", out_path)
+            with open(self.save_path, "w") as f:
+                f.write(json.dumps(payload))
+
+            print("engine state saved to", self.save_path)
         except Exception as e:
-            print(f"Err cor.jax_test.guard::Guard._export_engine_state | handler_line=211 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.jax_test.guard.Guard._export_engine_state: {e}")
-            print("export_engine_state failed:", e)
+            print(f"Warn _export_engine_state: {type(e).__name__}: {e}")
 
         # Local-only: param series stay in engine JSON / memory, not envs table.
 
@@ -370,4 +380,4 @@ class JaxGuard:
         return row
 
 if __name__ == "__main__":
-    Guard().main()
+    print("Run via main.py (repo root) with graph + components; this entry is a stub.")

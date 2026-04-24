@@ -132,10 +132,24 @@ def _parse_injection_cfg(injection_cfg: Optional[Dict[str, Any]]) -> Tuple[Optio
         print(f"[exception] main._parse_injection_cfg: {exc}")
         return None, repr(exc)
 
-def visualize():
-    amount_nodes_eff = int(os.environ.get("AMOUNT_NODES", "0") or 0)
-    sim_time_eff = int(os.environ.get("SIM_TIME", "0") or 0)
-    dims_eff = int(os.environ.get("DIMS", "0") or 0)
+def visualize(
+    jax_guard: Any = None,
+    output_dir: Optional[str] = None,
+    amount_nodes_eff: int = 0,
+    sim_time_eff: int = 0,
+    dims_eff: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Optional color_master 3D pipeline. Call with `jax_guard` (and optional `output_dir`) from
+    `run_main_process` after a successful JAX run. With `jax_guard is None` this is a no-op
+    and returns None (e.g. when imported but not used from __main__).
+    """
+    if jax_guard is None:
+        return None
+
+    amount_nodes_eff = amount_nodes_eff or int(os.environ.get("AMOUNT_NODES", "0") or 0)
+    sim_time_eff = sim_time_eff or int(os.environ.get("SIM_TIME", "0") or 0)
+    dims_eff = dims_eff or int(os.environ.get("DIMS", "0") or 0)
 
     visualizations: Optional[Dict[str, Any]] = None
     series_used: Optional[Dict[str, List[Any]]] = None
@@ -148,8 +162,8 @@ def visualize():
         from color_master.sim_bridge import collect_series_from_jax_guard, run_workflow_visualization
         _step("visualization.import.done")
     except Exception as exc:
-        print(f"Err main::run_main_process | handler_line=322 | {type(exc).__name__}: {exc}")
-        print(f"[exception] main.run_main_process: {exc}")
+        print(f"Err main::visualize | {type(exc).__name__}: {exc}")
+        print(f"[exception] main.visualize: {exc}")
         visualization_error = repr(exc)
         _step("visualization.import.failed", error=visualization_error)
 
@@ -196,6 +210,7 @@ def visualize():
                     anim=len((visualizations or {}).get("anim", {})),
                     combined=len((visualizations or {}).get("combined", {})),
                 )
+    return visualizations
 
 def run_main_process(
     amount_nodes: int,
@@ -208,8 +223,12 @@ def run_main_process(
         ]]
     ] = None,
     output_dir: Optional[str] = None,
-    user_id: int = "public",
+    user_id: Any = "public",
+    injection_file: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    # MCP/legacy: `injection_file` is the same payload as `injection_cfg`
+    if injection_cfg is None and injection_file is not None:
+        injection_cfg = injection_file
     _step(
         "run_main_process.start",
         output_dir=output_dir,
@@ -252,17 +271,19 @@ def run_main_process(
 
     jax_guard = JaxGuard(cfg=components).main()
 
+    _local_json = os.path.join(_REPO_ROOT, "local.json")
     result = {
         "ok": True,
         "jax_ok": jax_guard is not None,
         "user_id": user_id,
+        "local_json": _local_json if os.path.isfile(_local_json) else None,
     }
     return result
 
 if __name__ == "__main__":
     run_main_process(
         amount_nodes=3,
-        sim_time=3,
+        sim_time=1,
         dims=3,
     )
 

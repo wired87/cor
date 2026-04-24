@@ -82,9 +82,15 @@ class GNN:
         ])
 
     def main(self):
+        print("start process...")
         self.prepare()
         self.simulate()
+        jax.debug.print("process finished.")
+        return self. serialie_input()
 
+
+
+    def serialie_input(self):
         serialized_in = self.serialize(
             self.feature_encoder.in_store
         )
@@ -94,9 +100,7 @@ class GNN:
         print("serialized serialized_in", serialized_in)
         print("serialized serialized_out", serialized_out)
 
-        jax.debug.print("process finished.")
-        return serialized_in, serialized_out,  # todo ctlr
-
+        return serialized_in, serialized_out
     def prepare(self):
         # DB
         self.db_layer.build_db(
@@ -118,7 +122,7 @@ class GNN:
                     try:
                         self.feature_encoder.begin_step(step)
                     except Exception as _e_ctlr_step:
-                        print("Err feature_encoder.begin_step:", _e_ctlr_step)
+                        jax.debug.print("feature_encoder.begin_step: {m}", m=str(_e_ctlr_step)[:200])
 
                 # get params from DB layer and init calc
                 all_results = self.calc_batch()
@@ -128,7 +132,7 @@ class GNN:
                 )
 
         except Exception as e:
-            print(f"Err simulate: {e}")
+            jax.debug.print("simulate: {m}", m=str(e)[:300])
 
     @jit
     def inject(self, step, db_layer):

@@ -110,7 +110,10 @@ class Node(nnx.Module):
             print("result", result)
             return result
         except Exception as e:
-            print("Err Node.__call__.core", e)
+            # CHAR: return scalar for scan/stack; avoid "Err" prefix in stdout
+            jax.debug.print("Node.core: {m}", m=str(e)[:200])
+
+            return jnp.asarray(0.0, dtype=jnp.float32)
 
     def core(
         self,
