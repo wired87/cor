@@ -27,7 +27,6 @@ def calc_psi_bar(psi, gamma_0):
         in_axes=(0, None),
     )(psi, gamma_0)
 
-    #psi_bar = psi.conj().T @ gamma_0
     return psi_bar
 
 def calc_yukawa_coupling(y, psi_bar, psi, h):
