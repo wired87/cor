@@ -23,6 +23,7 @@ import numpy as np
 from firegraph.graph import GUtils
 from firegraph.utils.deserialize import deserialize
 from guard import Guard as CG
+from in_parser import convert_img_to_energy_map
 from injector import Injector
 
 from qfu.qf_utils import QFUtils
@@ -133,40 +134,40 @@ def run_color_master_from_config(
     return run_path_based_viz(sim_cfg_path)
 
 
-def _parse_injection_cfg(injection_cfg: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _parse_inj_cfg(inj_cfg: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    injection_cfg (single MCP payload field) supports:
+    inj_cfg (single MCP payload field) supports:
       - {"json": { ... }}  — overlay dict
       - {"b64": "<base64>"} — UTF-8 JSON text after decode
       - {"text": "<json string>"}
       - { ... } — bare dict treated as overlay (no wrapper keys)
     """
-    if not injection_cfg:
+    if not inj_cfg:
         return None, None
-    if not isinstance(injection_cfg, dict):
-        return None, "injection_cfg must be an object"
+    if not isinstance(inj_cfg, dict):
+        return None, "inj_cfg must be an object"
     try:
-        if "json" in injection_cfg:
-            inner = injection_cfg["json"]
+        if "json" in inj_cfg:
+            inner = inj_cfg["json"]
             if isinstance(inner, dict):
                 return inner, None
-            return None, "injection_cfg.json must be an object"
-        if "b64" in injection_cfg:
-            raw = base64.b64decode(str(injection_cfg["b64"])).decode("utf-8")
+            return None, "inj_cfg.json must be an object"
+        if "b64" in inj_cfg:
+            raw = base64.b64decode(str(inj_cfg["b64"])).decode("utf-8")
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return None, "decoded injection b64 must be a JSON object"
             return data, None
-        if "text" in injection_cfg:
-            data = json.loads(str(injection_cfg["text"]))
+        if "text" in inj_cfg:
+            data = json.loads(str(inj_cfg["text"]))
             if not isinstance(data, dict):
-                return None, "injection_cfg.text must parse to a JSON object"
+                return None, "inj_cfg.text must parse to a JSON object"
             return data, None
         # gien: whole object is the overlay (no b64/text/json wrapper).
-        return dict(injection_cfg), None
+        return dict(inj_cfg), None
     except Exception as exc:
-        print(f"Err main::_parse_injection_cfg | handler_line=123 | {type(exc).__name__}: {exc}")
-        print(f"[exception] main._parse_injection_cfg: {exc}")
+        print(f"Err main::_parse_inj_cfg | handler_line=123 | {type(exc).__name__}: {exc}")
+        print(f"[exception] main._parse_inj_cfg: {exc}")
         return None, repr(exc)
 
 def visualize() -> Optional[Dict[str, Any]]:
@@ -201,7 +202,7 @@ def run_main_process(
     amount_nodes: int,
     sim_time: int,
     dims: int,
-    injection_cfg: dict[
+    inj_cfg: dict[
         str,  # field
         list[tuple[tuple[int],  # pos
         list[list[int], list[int]]  # data
@@ -218,7 +219,7 @@ def run_main_process(
         sim_time=sim_time,
         dims=dims,
         user_id=user_id,
-        has_injection=bool(injection_cfg),
+        has_injection=bool(inj_cfg),
     )
 
     # Build G
@@ -228,13 +229,6 @@ def run_main_process(
 
     # DEFAULT INJECTION PATTERN
     fields = ["ELECTRON", "PHOTON"]
-    if injection_cfg is None:
-        injection_cfg = injector.rainbow(
-            sim_time,
-            amount_nodes,
-            fields,
-            dims,
-        )
 
     # BUILD SM
     _step("workflow.graph.initialize.start")
@@ -246,7 +240,7 @@ def run_main_process(
 
     # INCLUDE INJECTIONS
     injector.set_inj_pattern(
-        inj_struct=injection_cfg
+        inj_struct=inj_cfg
     )
 
     components = CG(amount_nodes, sim_time, dims, qfu, g, user_id=user_id, injector=injector).main()
@@ -266,9 +260,15 @@ def run_main_process(
     return result
 
 if __name__ == "__main__":
-    run_main_process(
-        amount_nodes=1,
-        sim_time=1,
-        dims=1,
-    )
+    # das system empfängt input img
+
+    inj_cfgs:list[dict] = convert_img_to_energy_map()
+
+    for item in inj_cfgs:
+        run_main_process(
+            amount_nodes=1,
+            sim_time=1,
+            dims=1,
+            inj_cfg=item
+        )
 
