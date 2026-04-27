@@ -33,7 +33,6 @@ class GNN(GNUtils):
         self.len_params_per_methods = {}
         self.change_store = []
 
-
         self.gpu = gpu
 
         # todo use runnable (after first versionnis deplyoed - currently just shcmatic)
