@@ -113,6 +113,22 @@ def _as_int(v: Any, default: Optional[int] = None) -> Optional[int]:
         return default
 
 
+def _optional_bool(v: Any) -> Optional[bool]:
+    """For run_visualization: None if absent, else coerced bool."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(int(v))
+    s = str(v).strip().lower()
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    if s in ("1", "true", "yes", "on"):
+        return True
+    return None
+
+
 def _normalize_run_payload(payload: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """
     Preferred body: { "sim_spec": {...}, "injection_file": {...} }.
@@ -122,11 +138,28 @@ def _normalize_run_payload(payload: Dict[str, Any]) -> tuple[Dict[str, Any], Opt
     if not isinstance(sim_spec, dict):
         sim_spec = {}
     if not sim_spec and any(
-        k in payload for k in ("output_dir", "amount_nodes", "sim_time", "dims", "user_id")
+        k in payload
+        for k in (
+            "output_dir",
+            "amount_nodes",
+            "sim_time",
+            "dims",
+            "user_id",
+            "run_visualization",
+            "visualization_dir",
+        )
     ):
         sim_spec = {
             k: payload[k]
-            for k in ("output_dir", "amount_nodes", "sim_time", "dims", "user_id")
+            for k in (
+                "output_dir",
+                "amount_nodes",
+                "sim_time",
+                "dims",
+                "user_id",
+                "run_visualization",
+                "visualization_dir",
+            )
             if k in payload
         }
     inj = payload.get("injection_file")
@@ -154,6 +187,10 @@ async def _run_route(req: Request) -> Response:
         dims=_as_int(sim_spec.get("dims")),
         user_id=int(sim_spec.get("user_id", 1)),
         injection_cfg=injection_file,
+        run_visualization=_optional_bool(sim_spec.get("run_visualization")),
+        visualization_dir=sim_spec.get("visualization_dir")
+        if isinstance(sim_spec.get("visualization_dir"), (str, type(None)))
+        else None,
     )
     return JSONResponse(result)
 
@@ -173,6 +210,10 @@ def run(
         dims=_as_int(spec.get("dims")),
         user_id=int(spec.get("user_id", 1)),
         injection_cfg=inj,
+        run_visualization=_optional_bool(spec.get("run_visualization")),
+        visualization_dir=spec.get("visualization_dir")
+        if isinstance(spec.get("visualization_dir"), (str, type(None)))
+        else None,
     )
 
 

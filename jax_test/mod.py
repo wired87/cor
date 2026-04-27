@@ -130,13 +130,7 @@ class Node(nnx.Module):
             print("bres", bres)"""
 
             result = self.runnable(*item)
-            """
-            jax.lax.cond(
-                must_recompute, # list cond
-                lambda: ,  # placeholder; todo: self.runnable(*item) when shapes match, jnp.zeros_like(bres)
-                lambda: bres,
-            )
-            """
+
             print("_calc result", result)
             return result
 

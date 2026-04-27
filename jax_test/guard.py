@@ -66,23 +66,8 @@ class JaxGuard:
         _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.save_path = os.path.join(_repo_root, "local.json")
 
-
-        # CHAR: Windows cp1252 console breaks on raw pprint of unicode in equations
-        try:
-            _s = json.dumps(_to_json_serializable(cfg), ensure_ascii=True, indent=2)
-            print(_s[:12000] + (" ...[truncated]" if len(_s) > 12000 else ""))
-        except Exception as ex:
-            print("cfg (fallback repr):", ex)
-        AMOUNT_NODES = int(self.cfg.get("AMOUNT_NODES"))
-        SIM_TIME = int(self.cfg.get("SIM_TIME"))
-        DIMS = int(self.cfg.get("DIMS"))
-
         for k, v in self.cfg.items():
             self.cfg[k] = parse_value(v)
-
-            if isinstance(self.cfg[k], dict):
-                for i, o in self.cfg[k].items():
-                    self.cfg[k][i] = parse_value(o)
 
         # layers
         self.gnn_layer = GNN(
@@ -90,66 +75,19 @@ class JaxGuard:
             **self.cfg
         )
 
-        self._live_ws = None
-
     def divide_vector(self, vec, divisor):
         """Divide all values of a given vector by divisor. Returns array same shape as vec."""
         v = jnp.asarray(vec)
         d = jnp.asarray(divisor)
         return v / d
 
-    def _make_send_live(self, vis_fps):
-        """Return a callable (gnn_self, step) -> None that sends LIVE_DATA via self._live_ws."""
-        import numpy as np
-        from grid.live_payload import build_live_data_payload
-
-        ws = self._live_ws
-        user_id = os.getenv("USER_ID")
-        env_id = os.getenv("ENV_ID")
-        if not ws or not user_id or not env_id:
-            return None
-
-        def send_live(gnn_self, step):
-            if ws is None:
-                return
-            # Throttle: send roughly every N steps to cap frame rate
-            counter = getattr(gnn_self, "_vis_step_counter", 0)
-            gnn_self._vis_step_counter = counter + 1
-            n = max(1, 100 // max(1, vis_fps))
-            if counter % n != 0:
-                return
-            try:
-                dl = gnn_self.db_layer
-                flat = np.asarray(dl.time_construct[0]).ravel()
-                if np.iscomplexobj(flat):
-                    flat = np.abs(flat.astype(np.complex64)).astype(np.float32)
-                cfg = {
-                    k: getattr(gnn_self, k, None)
-                    for k in ("DB_PARAM_CONTROLLER", "AMOUNT_PARAMS_PER_FIELD", "MODULES", "FIELDS", "DB_KEYS", "FIELD_KEYS")
-                }
-                data = build_live_data_payload(cfg, flat)
-                payload = {
-                    "type": "LIVE_DATA",
-                    "auth": {"user_id": user_id, "env_id": env_id},
-                    "data": data,
-                }
-                ws.send(json.dumps(payload, default=str))
-            except Exception as e:
-                print(f"Err cor.jax_test.guard::Guard._make_send_live.send_live | handler_line=129 | {type(e).__name__}: {e}")
-                print(f"[exception] cor.jax_test.guard.Guard.send_live: {e}")
-                print("[jax_test.Guard] LIVE_DATA send error:", e)
-
-        return send_live
 
     def main(self):
-        gnn_out = self.gnn_layer.main()
-        if gnn_out is not None and len(gnn_out) >= 2:
-            serialized_in, serialized_out = gnn_out[0], gnn_out[1]
+        serialized_raw_out, serialized_f_out = self.gnn_layer.main()
 
-            self._export_engine_state(
-                serialized_in,
-                serialized_out,
-            )
+        self._export_engine_state(
+            serialized_raw_out, serialized_f_out
+        )
 
         # results = self.finish()
         print("SIMULATION PROCESS FINISHED")
@@ -174,11 +112,10 @@ class JaxGuard:
 
         print("_export_data... done (local-only: no BigQuery)")
 
-    def _export_ctlr(self):
-        print("_export_ctlr...")
+    def _build_ctlr_for_export(self) -> Dict[str, Any]:
+        """DB + model controller metadata for local.json (same shape as _export_ctlr)."""
         dl = self.gnn_layer.db_layer
         env_id = os.getenv("ENV_ID")
-
         db_ctlr = {
             "id": env_id,
             "OUT_SHAPES": _to_json_serializable(dl.OUT_SHAPES),
@@ -186,34 +123,34 @@ class JaxGuard:
             "METHOD_TO_DB": _to_json_serializable(dl.METHOD_TO_DB),
             "AMOUNT_PARAMS_PER_FIELD": _to_json_serializable(dl.AMOUNT_PARAMS_PER_FIELD),
             "DB_PARAM_CONTROLLER": _to_json_serializable(dl.DB_PARAM_CONTROLLER),
-            "DB_KEYS": _to_json_serializable(self.cfg["DB_KEYS"]),
-            "FIELD_KEYS": _to_json_serializable(self.cfg["FIELD_KEYS"])
+            "DB_KEYS": _to_json_serializable(self.cfg.get("DB_KEYS")),
+            "FIELD_KEYS": _to_json_serializable(self.cfg.get("FIELD_KEYS")),
+            "MODULES": _to_json_serializable(self.cfg.get("MODULES")),
+            "FIELDS": _to_json_serializable(self.cfg.get("FIELDS")),
         }
-
-
         model_ctlr = {
             "id": env_id,
-            "VARIATION_KEYS": _to_json_serializable(self.cfg["VARIATION_KEYS"]),
+            "VARIATION_KEYS": _to_json_serializable(self.cfg.get("VARIATION_KEYS")),
         }
+        return {"db": db_ctlr, "model": model_ctlr}
 
-
-
+    def _export_ctlr(self):
+        print("_export_ctlr...")
+        _ = self._build_ctlr_for_export()
         print("_export_ctlr... done (local-only: no BigQuery)")
 
 
 
-    def _export_engine_state(self, serialized_in, serialized_out):
-        """Save all generated engine data (history, db, tdb, etc.) to a local .json file."""
+    def _export_engine_state(self, serialized_raw_out, serialized_f_out):
+        """Save all generated engine data (history, db, tdb, ctlr, param_series, etc.) to a local .json file."""
         #
         dl = self.gnn_layer.db_layer
+
         try:
             payload = {
-                "serialized_out": _to_json_serializable(base64.b64encode(serialized_out).decode('ascii')),
-                "serialized_in": _to_json_serializable(base64.b64encode(serialized_in).decode('ascii')),
+                "serialized_raw_out": _to_json_serializable(base64.b64encode(serialized_raw_out).decode('ascii')),
+                "serialized_f_out": _to_json_serializable(base64.b64encode(serialized_f_out).decode('ascii')),
             }
-
-            if hasattr(dl, "tdb") and dl.tdb is not None:
-                payload["tdb"] = _to_json_serializable(dl.tdb)
 
             with open(self.save_path, "w") as f:
                 f.write(json.dumps(payload))
@@ -283,32 +220,10 @@ class JaxGuard:
 
     def _build_param_series_payload(self, dl) -> Dict[str, Any]:
         """
-        Combine DBLayer per-param histories into column payloads:
-            { env_col_name: {\"values\": [...], \"features\": [...] }, ... }
+        Combine DBLayer per-param histories. Shape:
+        { "order", "param_indices", "series" } with series[col] = {values, features} in param index order.
         """
-        values_hist: Dict[int, list] = getattr(dl, "param_values_history", {}) or {}
-        features_hist: Dict[int, list] = getattr(dl, "param_features_history", {}) or {}
-        if not values_hist and not features_hist:
-            return {}
-
-        keys = self._build_param_keys()
-        all_indices = sorted(set(list(values_hist.keys()) + list(features_hist.keys())))
-        out: Dict[str, Any] = {}
-        for idx in all_indices:
-            if idx < 0:
-                continue
-            key = keys[idx] if idx < len(keys) else f"p_{idx}"
-            col_name = _sanitize_param_column_name(key)
-            vals = values_hist.get(idx, []) or []
-            feats = features_hist.get(idx, []) or []
-            # Ensure JSON-serializable primitives.
-            vals_f = [float(v) for v in vals]
-            feats_f = [float(f) for f in feats]
-            out[col_name] = {
-                "values": vals_f,
-                "features": feats_f,
-            }
-        return out
+        # todo paste parameter history
 
     def _persist_param_series_to_env(self, dl) -> None:
         """No-op: local pipeline does not write param series to a remote DB."""

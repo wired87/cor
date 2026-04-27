@@ -143,10 +143,6 @@ def deserialize_complex(bytes_struct, from_json=True, key=None, **args):
     """
     Deserialisiert ein einzelnes oder verschachteltes serialisiertes Array.
     """
-
-    #LOGGER.info(f"bytes_struct {bytes_struct}")
-    #LOGGER.info(f"key {key}")
-    #print("Deserialize:", bytes_struct)
     try:
         # Falls String, erst JSON laden
         if from_json and isinstance(bytes_struct, str):
@@ -170,8 +166,6 @@ def deserialize_complex(bytes_struct, from_json=True, key=None, **args):
         #print(f"deserialized complex: {restored}")
         return restored
     except Exception as e:
-        print(f"Err core.utils.serialize_complex::deserialize_complex | handler_line=166 | {type(e).__name__}: {e}")
-        print(f"[exception] core.utils.serialize_complex.deserialize_complex: {e}")
         print("Error deserialize struct", e)
 
 def check_serilisation(data):

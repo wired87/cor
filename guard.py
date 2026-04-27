@@ -171,7 +171,7 @@ class Guard:
         """
         print("Guard.main...")
         components = self.converter(
-            env_id, self.amount_nodes, self.sim_time, self.dims
+            env_id
         )
         print("start_grid_local...")
 
@@ -286,16 +286,13 @@ class Guard:
 
 
 
-    def converter(self, env_id:str, amount_nodes, sim_time, dims):
+    def converter(self, env_id:str, ):
         """
         CREATE/COLL ECT PATTERNS FOR ALL ENVS AND CREATE VM
 
         CHAR: Sync run scalars on ``self`` so every subgraph helper (e.g. energy/injector) and
         ``method_layer`` see the same ``amount_nodes``, ``sim_time``, ``dims`` as the cfg dict.
         """
-        self.amount_nodes = int(amount_nodes)
-        self.sim_time = int(sim_time)
-        self.dims = int(dims)
         print("Main started...")
         env_node = self.g.get_node(env_id)
         if not env_node:
@@ -339,9 +336,9 @@ class Guard:
             **injection_patterns,
             **db_to_method_struct,
             "METHOD_TO_DB": method_to_db if method_to_db is not None else [],
-            "AMOUNT_NODES": amount_nodes,
-            "SIM_TIME": sim_time,
-            "DIMS": dims,
+            "AMOUNT_NODES": self.amount_nodes,
+            "SIM_TIME": self.sim_time,
+            "DIMS": self.dims,
         }
 
 
@@ -754,10 +751,6 @@ class Guard:
             )
             print("fields loaded:", len(fields))
 
-            """
-            for f_enum_idx, (fid, fattrs) in enumerate(fields):
-                print(f"mod {mid}:{m_idx}->{f_enum_idx}", fid)
-            """
         try:
             for mi, (mid, m) in enumerate(modules):
                 m_idx = m.get("module_index", mi)
@@ -1237,8 +1230,6 @@ class Guard:
                 flatten_rtk_map.extend(module_items)
             return flatten_rtk_map
         except Exception as e:
-            print(f"Err cor.qbrain.cor.guard::Guard.set_edge_method_to_db | handler_line=1933 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.qbrain.cor.guard.Guard.set_edge_method_to_db: {e}")
             print("Err set_edge_method_to_db", e)
             # Return valid empty structure to avoid None breaking grid
             return []
@@ -1332,7 +1323,7 @@ class Guard:
                         if (eqattrs or {}).get("type") != "METHOD":
                             continue
                         global_eq_idx = method_offsets_by_module_index.get(m_idx, 0) + eq_idx
-                        EQ_AMOUNT_VRIATIONS = 0
+                        EQ_AMOUNT_VRIATIONS_FIELDS = 0
 
                         # VALIDATE PARAM
                         params = eqattrs.get("params", [])
@@ -1525,7 +1516,7 @@ class Guard:
                                 # todo calc just / len(method_param) to sort them
 
                             field_variations_eq = len(expand_field_eq_variation_struct)
-                            EQ_AMOUNT_VRIATIONS += field_variations_eq
+                            EQ_AMOUNT_VRIATIONS_FIELDS += field_variations_eq
 
                             # add len field var to emthod struct
                             if global_eq_idx < len(db_to_method["LEN_FEATURES_PER_EQ"]):
@@ -1539,7 +1530,7 @@ class Guard:
 
                         db_to_method[
                             "DB_CTL_VARIATION_LEN_PER_EQUATION"
-                        ][m_idx].append(EQ_AMOUNT_VRIATIONS)
+                        ][m_idx].append(EQ_AMOUNT_VRIATIONS_FIELDS)
                     except Exception as e:
                         print("Err set_edge_db_to_method", e, eqid)
 

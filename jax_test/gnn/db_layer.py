@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from Tools.demo.sortvisu import Array
 from jax import jit, vmap
 import numpy as np
 
@@ -88,7 +89,11 @@ class DBLayer:
         # For sum_results: arange over equations (same length as LEN_FEATURES_PER_EQ).
         self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM = len(LEN_FEATURES_PER_EQ)
         self.in_features=[]
+        self.out_idx_map = []
+        self.store = []
+        self.out_f_store = []
 
+        self.out_store = []
 
 
     def build_db(self, amount_nodes):
@@ -167,51 +172,6 @@ class DBLayer:
         jax.debug.print("build_db... done")
 
 
-    def stack_tdb(self, sumed_results):
-        print("stack_tdb... started")
-
-        try:
-            # Step 1: Mapping indices
-            def get_rel_db_idx(coord):
-                print("get_rel_db_idx coord", coord)
-                c = jnp.ravel(jnp.asarray(coord))
-                return self.get_rel_db_index(c[-3], c[-2], c[-1])
-
-            print("stack_tdb: mapping indices via vmap...")
-            idx_map = vmap(get_rel_db_idx, in_axes=0)(self.METHOD_TO_DB)
-            print(f"stack_tdb: idx_map shape: {idx_map.shape}")
-
-            # Step 2: Preparing data
-            sumed_results = jnp.asarray(sumed_results).ravel()
-            n = idx_map.shape[0]
-            print(f"stack_tdb: sumed_results flattened, new shape: {sumed_results.shape}")
-
-            if sumed_results.size >= n:
-                to_set = sumed_results[:n]
-            else:
-                to_set = jnp.concatenate([sumed_results, jnp.zeros(n - sumed_results.size, dtype=sumed_results.dtype)])
-            print(f"stack_tdb: to_set shape prepared: {to_set.shape}")
-
-            # Step 3: Ensuring tdb array format
-            if not hasattr(self.tdb, "at"):
-                size = max(int(jnp.max(jnp.asarray(idx_map))) + 1, n)
-                tdb_arr = jnp.zeros(size, dtype=to_set.dtype)
-                print(f"stack_tdb: initialized new tdb_arr with size {size}")
-            else:
-                tdb_arr = jnp.ravel(jnp.asarray(self.tdb))
-                print("stack_tdb: using existing tdb array")
-
-            # Step 4: Final Assignment
-            print("stack_tdb: performing .at[].set() assignment...")
-            self.tdb = tdb_arr.at[idx_map].set(to_set)
-
-            print("stack_tdb... done successfully")
-        except Exception as e:
-            print(f"Err stack_tdb: {e}")
-            raise e
-
-
-
 
     def divide_time_values_all_dims(self, divisor):
         """
@@ -228,43 +188,66 @@ class DBLayer:
             )
         self.time_construct = self.time_construct / divisor
 
-    def save_t_step(self, all_results):
+
+
+    def create_out_idx_map(self):
+        # pre set idx map for faster sortin in run time
+        def get_rel_db_idx(coord):
+            print("get_rel_db_idx coord", coord)
+            c = jnp.ravel(jnp.asarray(coord))
+            return self.get_rel_db_index(c[-3], c[-2], c[-1])
+
+        print("stack_tdb: mapping indices via vmap...")
+        self.out_idx_map = vmap(get_rel_db_idx, in_axes=0)(
+            self.METHOD_TO_DB
+        )
+
+    def save_in(self, in_features):
+        """
+        stack created in embeddings to list
+        todo save raw in
+        """
+        for i, item in enumerate(in_features):
+            self.in_features[i].append(item)
+        print("save in... done")
+
+    def save_out(self, flatten_results, out_features):
+        # receive results single iter all eqs extend
+        for i, (flat_result, embedding) in enumerate(zip(flatten_results, out_features)):
+            self.out_f_store[i].append(embedding)
+            self.out_store[i].extend(flat_result)
+        print("save_out... done")
+
+    def save_t_step(self, all_out_features, all_in_features, raw_out):
         try:
             jax.debug.print(f"save_t_step...")
+            self.save_in(all_in_features)
 
-            all_results = self.flatten_result(all_results)
-
-            sumed_results = self.sum_results(all_results)
-
+            flatten_results:jnp.array = self.flatten_result(raw_out)
+            self.save_out(all_out_features, flatten_results)
+            sumed_results = self._sum_results_impl(flatten_results)
             sumed_results = jnp.ravel(jnp.asarray(sumed_results, dtype=jnp.float32))
-            self.time_construct = self.time_construct.at[1].set(self.time_construct[0])
 
-            self.stack_tdb(sumed_results)
+            # switch live tdb
+            self.time_construct = self.time_construct.at[1].set(
+                self.time_construct[0]
+            )
 
+            # save results in live db
             self.sort_results_rtdb(sumed_results)
 
+            #
             self._update_param_time_series(sumed_results)
 
             self.time_construct = self.time_construct.at[0].set(self.nodes)
             jax.debug.print(f"save_t_step... done")
-            return all_results
         except Exception as e:
             print("Err save_t_step", e)
 
     def _update_param_time_series(self, sumed_results):
-        """
-        Update Python-side histories for each parameter:
-        - features: aggregated feature value per param (from sumed_results + METHOD_TO_DB mapping)
-        - values: scalar summary of current param state derived from self.nodes.
-
-        This runs on the host only and must NOT affect JAX-traced execution.
-        """
-        # Map methods -> absolute unscaled param indices using METHOD_TO_DB and controller helpers.
         try:
             sumed_results = jnp.ravel(jnp.asarray(sumed_results, dtype=jnp.float32))
         except Exception:
-            print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=400 | Exception handler triggered")
-            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
             return
 
         try:
@@ -278,8 +261,6 @@ class DBLayer:
             idx_np = np.asarray(idx_map).ravel()
             feat_np = np.asarray(sumed_results, dtype=np.float32).ravel()
         except Exception:
-            print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=414 | Exception handler triggered")
-            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
             return
 
         if idx_np.size == 0 or feat_np.size == 0:
@@ -380,182 +361,6 @@ class DBLayer:
             results
         )
 
-    def sum_results(self, flattened_eq_results):
-        # scan each methods outs; separate into field variation blocks; sum; sort to db
-        # --- FIX: Return single flat array so stack_tdb gets uniform shape (avoids "inhomogeneous shape") ---
-        print("sum_results...")
-        n_methods = self.METHOD_TO_DB.shape[0]
-        try:
-            return self._sum_results_impl(flattened_eq_results, n_methods)
-        except Exception as e:
-            print(f"Err cor.jax_test.gnn.db_layer::DBLayer.sum_results | handler_line=520 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.jax_test.gnn.db_layer.DBLayer.sum_results: {e}")
-            print("Err sum_results:", e)
-            # --- FIX: Inhomogeneous (19,) or other error: return zeros and do not print so terminal shows no "Err". ---
-            return jnp.zeros(max(1, n_methods), dtype=jnp.float32)
-
-    def _sum_results_impl(self, flattened_eq_results, n_methods):
-        def _sum(_slice):
-            return jnp.sum(jnp.array(_slice))
-
-        def process_eq_result_batch(eq_out_batch, eq_idx):
-            #print("process_eq_result_batch...")
-            try:
-                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
-                feature_lengths = [int(x) for x in feature_lengths]
-                block_count = len(feature_lengths)
-                total_len = sum(feature_lengths)
-                if block_count <= 0:
-                    return jnp.zeros((0,), dtype=jnp.float32)
-
-                # Normalize to 2D float32 without ever building an inhomogeneous array from 19 variable-length elements.
-                need_pad = False
-                try:
-                    arr = jnp.asarray(eq_out_batch, dtype=jnp.float32)
-                    if arr.ndim != 2:
-                        arr = jnp.reshape(arr, (1, -1))
-                    if getattr(arr.dtype, "kind", "") == "O" or (arr.ndim == 2 and arr.size > 0 and not jnp.issubdtype(arr.dtype, jnp.floating)):
-                        need_pad = True
-                except BaseException:
-                    print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=548 | BaseException handler triggered")
-                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught BaseException")
-                    need_pad = True
-                if need_pad:
-                    # Build iterable of elements without jnp.asarray(whole): 1D/2D array -> index; list -> iterate.
-                    if hasattr(eq_out_batch, "ndim"):
-                        n = eq_out_batch.shape[0] if eq_out_batch.ndim >= 1 else 1
-                        it = [eq_out_batch[i] for i in range(n)]
-                    elif hasattr(eq_out_batch, "__iter__"):
-                        it = list(eq_out_batch)
-                    else:
-                        it = [eq_out_batch]
-                    rows = []
-                    for x in it:
-                        try:
-                            r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
-                        except Exception:
-                            print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=564 | Exception handler triggered")
-                            print("[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught Exception")
-                            r = jnp.zeros(1, dtype=jnp.float32)
-                        rows.append(r)
-                    if not rows:
-                        eq_out_batch = jnp.zeros((1, 1), dtype=jnp.float32)
-                    else:
-                        max_len = max(int(r.size) for r in rows)
-                        eq_out_batch = jnp.stack([
-                            jnp.concatenate([r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[:max_len]
-                            for r in rows
-                        ])
-                else:
-                    eq_out_batch = arr
-                n_rows = eq_out_batch.shape[0]
-                if n_rows != total_len:
-                    flat = jnp.ravel(eq_out_batch)
-                    width = int(eq_out_batch.shape[1]) if eq_out_batch.ndim == 2 and int(eq_out_batch.shape[1]) > 0 else 1
-                    needed = total_len * width
-                    if flat.size < needed:
-                        flat = jnp.concatenate([flat, jnp.zeros(needed - int(flat.size), dtype=jnp.float32)])
-                    else:
-                        flat = flat[:needed]
-                    eq_out_batch = jnp.reshape(flat, (total_len, width))
-                repeats = jnp.asarray(feature_lengths, dtype=jnp.int32)
-                group_ids = jnp.repeat(jnp.arange(block_count, dtype=jnp.int32), repeats)
-                group_sums = ops.segment_sum(eq_out_batch, group_ids)
-                out = vmap(_sum, in_axes=0)(group_sums)
-                return jnp.ravel(jnp.asarray(out, dtype=jnp.float32))
-            except Exception as e:
-                print(f"Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=593 | {type(e).__name__}: {e}")
-                print(f"[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: {e}")
-                print("Err process_eq_result_batch:", e)
-                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
-                n = len(feature_lengths)
-                return jnp.zeros(max(1, n), dtype=jnp.float32)
-
-        # --- FIX: Loop over equations; ensure eq_batch is always a regular 2D float32 array before process_eq_result_batch. ---
-        def _to_2d_float32(batch):
-            """Convert any batch to 2D float32 without ever calling jnp.asarray(whole); never raise."""
-            try:
-                try:
-                    a = jnp.asarray(batch, dtype=jnp.float32)
-                    if a.ndim == 2 and a.size > 0 and jnp.issubdtype(a.dtype, jnp.floating):
-                        return a
-                except BaseException:
-                    print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl._to_2d_float32 | handler_line=608 | BaseException handler triggered")
-                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer._to_2d_float32: caught BaseException")
-                    pass
-                if hasattr(batch, "ndim") and batch.ndim >= 1:
-                    n = int(batch.shape[0])
-                    it = [batch[j] for j in range(n)]
-                elif hasattr(batch, "__iter__"):
-                    it = list(batch)
-                else:
-                    it = [batch]
-                rows = []
-                for x in it:
-                    try:
-                        r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
-                    except BaseException:
-                        print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl._to_2d_float32 | handler_line=622 | BaseException handler triggered")
-                        print("[exception] cor.jax_test.gnn.db_layer.DBLayer._to_2d_float32: caught BaseException")
-                        r = jnp.zeros(1, dtype=jnp.float32)
-                    rows.append(r)
-                if not rows:
-                    return jnp.zeros((0, 0), dtype=jnp.float32)
-                max_len = max(int(r.size) for r in rows)
-                return jnp.stack([
-                    jnp.concatenate([r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[:max_len]
-                    for r in rows
-                ])
-            except BaseException:
-                print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl._to_2d_float32 | handler_line=633 | BaseException handler triggered")
-                print("[exception] cor.jax_test.gnn.db_layer.DBLayer._to_2d_float32: caught BaseException")
-                return jnp.zeros((1, 1), dtype=jnp.float32)
-
-        flat_parts = []
-        try:
-            for i in range(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM):
-                eq_batch = flattened_eq_results[i] if i < len(flattened_eq_results) else jnp.zeros((0, 0))
-                eq_batch = _to_2d_float32(eq_batch)
-                try:
-                    part = process_eq_result_batch(eq_batch, i)
-                    p = jnp.ravel(jnp.asarray(part, dtype=jnp.float32))
-                except BaseException:
-                    print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=645 | BaseException handler triggered")
-                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
-                    n = len(self.LEN_FEATURES_PER_EQ[i]) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(self.LEN_FEATURES_PER_EQ) else 1
-                    p = jnp.zeros(max(1, n), dtype=jnp.float32)
-                flat_parts.append(p)
-        except BaseException:
-            # --- FIX: If anything in the loop raises (e.g. indexing flattened_eq_results), fill flat_parts with zeros. ---
-            print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=650 | BaseException handler triggered")
-            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
-            n_eq = int(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM) if hasattr(self, "DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM") else 1
-            flat_parts = [
-                jnp.zeros(
-                    max(1, len(self.LEN_FEATURES_PER_EQ[i])) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(self.LEN_FEATURES_PER_EQ) else 1,
-                    dtype=jnp.float32,
-                )
-                for i in range(max(1, n_eq))
-            ]
-        if not flat_parts:
-            print("sum_results... done")
-            return jnp.array([])
-        # --- FIX: Build out from flat_parts without ever creating (19,) + inhomogeneous; on failure return zeros. ---
-        try:
-            out = jnp.ravel(jnp.asarray(flat_parts[0], dtype=jnp.float32))
-            for p in flat_parts[1:]:
-                out = jnp.concatenate([out, jnp.ravel(jnp.asarray(p, dtype=jnp.float32))])
-        except Exception:
-            print("Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=669 | Exception handler triggered")
-            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught Exception")
-            print("sum_results... done (fallback zeros)")
-            return jnp.zeros(max(1, n_methods), dtype=jnp.float32)
-        if out.size < n_methods:
-            out = jnp.concatenate([out, jnp.zeros(n_methods - out.size, dtype=out.dtype)])
-        elif out.size > n_methods:
-            out = out[:n_methods]
-        print("sum_results... done")
-        return out
 
 
     def flat_item(
@@ -568,7 +373,7 @@ class DBLayer:
         flat = jnp.ravel(item)
         return flat
 
-    def flatten_result(self, results) -> list:
+    def flatten_result(self, results) -> list | Array:
         try:
             def _to_1d(x):
                 a = jnp.asarray(x)
@@ -576,34 +381,8 @@ class DBLayer:
                     return jnp.reshape(a, (1,)).astype(jnp.float32)
                 return jnp.ravel(a).astype(jnp.float32)
 
-            def _flat_eq_outs(batch):
-                # Flatten each item to 1D; avoid jnp.asarray(whole_batch) which can trigger "cannot concatenate" on mixed shapes.
-                raveled = []
-                for x in batch:
-                    try:
-                        raveled.append(_to_1d(x))
-                    except Exception as e:
-                        print("Err flatten result", e)
-                        raveled.append(jnp.concatenate([_to_1d(z) for z in x]))
-                if not raveled:
-                    return jnp.zeros((0, 0), dtype=jnp.float32)
-                sizes = [int(jnp.size(r)) for r in raveled]
-                max_len = max(sizes)
-                padded = []
-                for r in raveled:
-                    r_1d = jnp.reshape(r, (-1,))
-                    n = int(jnp.size(r_1d))
-                    if n < max_len:
-                        r_1d = jnp.concatenate([r_1d, jnp.zeros(max_len - n, dtype=jnp.float32)])
-                    else:
-                        r_1d = r_1d[:max_len]
-                    padded.append(r_1d)
-                return jnp.stack(padded, axis=0)
-
-            return [_flat_eq_outs(batch) for batch in results]
+            return vmap(_to_1d, in_axes=0)(results)
         except Exception as e:
-            print(f"Err cor.jax_test.gnn.db_layer::DBLayer.flatten_result | handler_line=726 | {type(e).__name__}: {e}")
-            print(f"[exception] cor.jax_test.gnn.db_layer.DBLayer.flatten_result: {e}")
             print("Err flatten_result:", e)
             return results
 
@@ -611,7 +390,7 @@ class DBLayer:
             self,
             flatten_step_results, # list[response
     ):
-        # SAVE RTDB
+        # SAVE RTDB FOR ENTIRE ITER
         jax.debug.print("sort_results_rtdb... ")
         nodes = self.nodes
 
@@ -621,22 +400,25 @@ class DBLayer:
         ):
             # get abs scaled idx
             coords, flattened_item = payload
-            # --- FIX: get_db_index takes one arg (abs_unscaled_param_idx); get it from 3 coords via get_rel_db_index. ---
+
             abs_unscaled_param_idx = self.get_rel_db_index(*jnp.array(coords)[-3:])
             _start, _len = self.get_db_index(abs_unscaled_param_idx)
 
-            # --- FIX: dynamic_update_slice update must have same rank and dtype as operand; 1D and cast to nodes.dtype. ---
+            #
             flat = jnp.reshape(jnp.asarray(flattened_item, dtype=nodes.dtype), (-1,))
             nd = nodes.ndim
             s = jnp.ravel(jnp.asarray(_start))
             start_indices = (s[0],) * nd if nd >= 1 else ()
+
+            # apply result to db
             nodes = jax.lax.dynamic_update_slice(
-                nodes,
+                nodes, # 1d arr
                 flat,
                 start_indices
             )
             return nodes, None
 
+        # Loop and apply Results
         nodes, _ = jax.lax.scan(
             apply_one,
             nodes,
@@ -645,7 +427,7 @@ class DBLayer:
                 flatten_step_results
             )
         )
-
+        #
         self.nodes = nodes
         jax.debug.print("sort_results_rtdb... done")
 
@@ -990,4 +772,185 @@ class DBLayer:
             return vmap(_wrapper, in_axes=0)(batch)
         return jnp.take(scaled_vals, batch)
 
+    def _sum_results_impl(self, flattened_eq_results):
+        print("sum_results...")
+        results_sumed = []
+        offset = 0
+        for amount_variations, sum_db_dest in zip(self.LEN_FEATURES_PER_EQ, self.METHOD_TO_DB):
+            sumed_result = jnp.sum(flattened_eq_results[offset:amount_variations])
+            results_sumed.append(sumed_result)
+            offset += amount_variations
+        print("results_sumed... done")
+        return sumed_result
 
+
+
+
+
+
+
+        def _sum(_slice):
+            return jnp.sum(jnp.array(_slice))
+
+        def process_eq_result_batch(eq_out_batch, eq_idx):
+            # print("process_eq_result_batch...")
+            try:
+                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
+                feature_lengths = [int(x) for x in feature_lengths]
+                block_count = len(feature_lengths)
+                total_len = sum(feature_lengths)
+                if block_count <= 0:
+                    return jnp.zeros((0,), dtype=jnp.float32)
+
+                # Normalize to 2D float32 without ever building an inhomogeneous array from 19 variable-length elements.
+                need_pad = False
+                try:
+                    arr = jnp.asarray(eq_out_batch, dtype=jnp.float32)
+                    if arr.ndim != 2:
+                        arr = jnp.reshape(arr, (1, -1))
+                    if getattr(arr.dtype, "kind", "") == "O" or (
+                            arr.ndim == 2 and arr.size > 0 and not jnp.issubdtype(arr.dtype, jnp.floating)):
+                        need_pad = True
+                except BaseException:
+                    print(
+                        "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=548 | BaseException handler triggered")
+                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught BaseException")
+                    need_pad = True
+                if need_pad:
+                    # Build iterable of elements without jnp.asarray(whole): 1D/2D array -> index; list -> iterate.
+                    if hasattr(eq_out_batch, "ndim"):
+                        n = eq_out_batch.shape[0] if eq_out_batch.ndim >= 1 else 1
+                        it = [eq_out_batch[i] for i in range(n)]
+                    elif hasattr(eq_out_batch, "__iter__"):
+                        it = list(eq_out_batch)
+                    else:
+                        it = [eq_out_batch]
+                    rows = []
+                    for x in it:
+                        try:
+                            r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
+                        except Exception:
+                            print(
+                                "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=564 | Exception handler triggered")
+                            print(
+                                "[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught Exception")
+                            r = jnp.zeros(1, dtype=jnp.float32)
+                        rows.append(r)
+                    if not rows:
+                        eq_out_batch = jnp.zeros((1, 1), dtype=jnp.float32)
+                    else:
+                        max_len = max(int(r.size) for r in rows)
+                        eq_out_batch = jnp.stack([
+                            jnp.concatenate(
+                                [r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[
+                                :max_len]
+                            for r in rows
+                        ])
+                else:
+                    eq_out_batch = arr
+                n_rows = eq_out_batch.shape[0]
+                if n_rows != total_len:
+                    flat = jnp.ravel(eq_out_batch)
+                    width = int(eq_out_batch.shape[1]) if eq_out_batch.ndim == 2 and int(
+                        eq_out_batch.shape[1]) > 0 else 1
+                    needed = total_len * width
+                    if flat.size < needed:
+                        flat = jnp.concatenate([flat, jnp.zeros(needed - int(flat.size), dtype=jnp.float32)])
+                    else:
+                        flat = flat[:needed]
+                    eq_out_batch = jnp.reshape(flat, (total_len, width))
+                repeats = jnp.asarray(feature_lengths, dtype=jnp.int32)
+                group_ids = jnp.repeat(jnp.arange(block_count, dtype=jnp.int32), repeats)
+                group_sums = ops.segment_sum(eq_out_batch, group_ids)
+                out = vmap(_sum, in_axes=0)(group_sums)
+                return jnp.ravel(jnp.asarray(out, dtype=jnp.float32))
+            except Exception as e:
+                print("Err process_eq_result_batch:", e)
+                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
+                n = len(feature_lengths)
+                return jnp.zeros(max(1, n), dtype=jnp.float32)
+
+        def _to_2d_float32(batch):
+            try:
+                try:
+                    a = jnp.asarray(batch, dtype=jnp.float32)
+                    if a.ndim == 2 and a.size > 0 and jnp.issubdtype(a.dtype, jnp.floating):
+                        return a
+                except Exception as e:
+                    print("Err _to_2d_float32", e)
+                    pass
+                if hasattr(batch, "ndim") and batch.ndim >= 1:
+                    n = int(batch.shape[0])
+                    it = [batch[j] for j in range(n)]
+                elif hasattr(batch, "__iter__"):
+                    it = list(batch)
+                else:
+                    it = [batch]
+                rows = []
+                for x in it:
+                    try:
+                        r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
+                    except Exception as e:
+                        print("Err2 _to_2d_float32", e)
+                        r = jnp.zeros(1, dtype=jnp.float32)
+                    rows.append(r)
+                if not rows:
+                    return jnp.zeros((0, 0), dtype=jnp.float32)
+                max_len = max(int(r.size) for r in rows)
+                return jnp.stack([
+                    jnp.concatenate(
+                        [r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[:max_len]
+                    for r in rows
+                ])
+            except Exception as e:
+                print("Err", e)
+                return jnp.zeros((1, 1), dtype=jnp.float32)
+
+        flat_parts = []
+        try:
+            for i in range(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM):
+                eq_batch = flattened_eq_results[i] if i < len(flattened_eq_results) else jnp.zeros((0, 0))
+                eq_batch = _to_2d_float32(eq_batch)
+                try:
+                    part = process_eq_result_batch(eq_batch, i)
+                    p = jnp.ravel(jnp.asarray(part, dtype=jnp.float32))
+                except BaseException:
+                    print(
+                        "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=645 | BaseException handler triggered")
+                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
+                    n = len(self.LEN_FEATURES_PER_EQ[i]) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(
+                        self.LEN_FEATURES_PER_EQ) else 1
+                    p = jnp.zeros(max(1, n), dtype=jnp.float32)
+                flat_parts.append(p)
+        except BaseException:
+            # --- FIX: If anything in the loop raises (e.g. indexing flattened_eq_results), fill flat_parts with zeros. ---
+            print(
+                "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=650 | BaseException handler triggered")
+            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
+            n_eq = int(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM) if hasattr(self,
+                                                                                 "DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM") else 1
+            flat_parts = [
+                jnp.zeros(
+                    max(1, len(self.LEN_FEATURES_PER_EQ[i])) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(
+                        self.LEN_FEATURES_PER_EQ) else 1,
+                    dtype=jnp.float32,
+                )
+                for i in range(max(1, n_eq))
+            ]
+        if not flat_parts:
+            print("sum_results... done")
+            return jnp.array([])
+        # --- FIX: Build out from flat_parts without ever creating (19,) + inhomogeneous; on failure return zeros. ---
+        try:
+            out = jnp.ravel(jnp.asarray(flat_parts[0], dtype=jnp.float32))
+            for p in flat_parts[1:]:
+                out = jnp.concatenate([out, jnp.ravel(jnp.asarray(p, dtype=jnp.float32))])
+        except Exception as e:
+            print("sum_results... done (fallback zeros)", e)
+            return jnp.zeros(max(1, n_methods), dtype=jnp.float32)
+        if out.size < n_methods:
+            out = jnp.concatenate([out, jnp.zeros(n_methods - out.size, dtype=out.dtype)])
+        elif out.size > n_methods:
+            out = out[:n_methods]
+        print("sum_results... done")
+        return out
