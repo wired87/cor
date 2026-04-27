@@ -4,7 +4,6 @@ class GNUtils:
     def __init__(self):
         pass
 
-
     #
     def short_transformed(self, all_ax, transformed):
         print("short_transformed... ")
