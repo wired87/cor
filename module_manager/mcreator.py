@@ -44,22 +44,6 @@ class ModuleCreator(
 
 
     def load_sm(self):
-        """
-        Load sm for the ModuleCreator workflow.
-
-        Workflow:
-        1. Starts from the current object state and local workflow context.
-        2. Builds intermediate state such as `new_modules`, `mod_id` before applying the main logic.
-        3. Branches on validation or runtime state to choose the next workflow path.
-        4. Delegates side effects or helper work through `print()`, `os.listdir()`, `os.path.isdir()`.
-        5. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - None.
-
-        Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
-        """
         print("load_sm...")
         new_modules = []
         for i, module_file in enumerate(list(os.listdir(ARSENAL_PATH))):
@@ -124,22 +108,6 @@ class ModuleCreator(
 
 
     def create_modulator(self, mid, i, code=None):
-        """
-        Create modulator for the ModuleCreator workflow.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `mid`, `code`.
-        2. Builds intermediate state such as `mref` before applying the main logic.
-        3. Delegates side effects or helper work through `print()`, `Modulator()`, `self.g.add_node()`.
-        4. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - `mid`: Caller-supplied value used during processing.
-        - `code`: Caller-supplied value used during processing.
-
-        Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
-        """
         try:
             mref = Modulator(
                 g=self.g,

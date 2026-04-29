@@ -173,44 +173,14 @@ class Guard:
         components = self.converter(
             env_id
         )
-        print("start_grid_local...")
 
         with open(self.cfg_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(components, indent=4, ensure_ascii=False))
-        print(f"Guard cfg written to {self.cfg_file}:")
 
-        # CHAR: avoid Windows console cp1252 UnicodeEncodeError on huge `components` print
-        keys = list(components.keys())
-        print(f"components keys ({len(keys)}): {keys}")
-        try:
-            preview = json.dumps(components, ensure_ascii=True, default=str, indent=2)
-            max_len = 12000
-            if len(preview) > max_len:
-                preview = preview[:max_len] + "\n... [truncated]"
-            print("components (ascii preview):\n", preview)
-        except Exception as ex:
-            print("components: could not build preview:", ex)
-        print("Guard.main... done")
+        print("components", components)
         return components
 
     def handle_deployment(self, env_id, components):
-        """
-        Handle deployment for the Guard workflow.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `env_id`, `components`.
-        2. Builds intermediate state such as `world_cfg`, `container_env`, `path` before applying the main logic.
-        3. Branches on validation or runtime state to choose the next workflow path.
-        4. Delegates side effects or helper work through `print()`, `self.create_vm_cfgs()`, `pprint.pp()`.
-        5. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - `env_id`: Identifier used to target the relevant entity.
-        - `components`: Caller-supplied value used during processing.
-
-        Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
-        """
         print(f"\n[START] handle_deployment für Env: {env_id}")
 
         try:
@@ -707,22 +677,6 @@ class Guard:
 
 
     def create_db(self, modules):
-        """
-        Create db for the Guard workflow.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `modules`.
-        2. Builds intermediate state such as `db`, `axis`, `shapes` before applying the main logic.
-        3. Branches on validation or runtime state to choose the next workflow path.
-        4. Delegates side effects or helper work through `print()`, `self.get_empty_field_structure()`, `enumerate()`.
-        5. Returns the assembled result to the caller.
-
-        Inputs:
-        - `modules`: Caller-supplied value used during processing.
-
-        Returns:
-        - Returns the computed result for the caller.
-        """
         print("[create_db] start")
         import json
         db = self.get_empty_field_structure()

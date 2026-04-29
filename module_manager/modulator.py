@@ -138,21 +138,6 @@ class Modulator(
 
 
     def module_conversion_process(self):
-        """
-        Module conversion process for the Modulator workflow.
-
-        Workflow:
-        1. Starts from the current object state and local workflow context.
-        2. Branches on validation or runtime state to choose the next workflow path.
-        3. Delegates side effects or helper work through `ModuleLoader.__init__()`, `self.load_local_module_codebase()`, `self.create_code_G()`.
-        4. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - None.
-
-        Returns:
-        - Returns `None`; the main effects happen through state updates, I/O, or delegated calls.
-        """
         print("module_conversion_process...")
         try:
             ModuleLoader.__init__(

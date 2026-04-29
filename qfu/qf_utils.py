@@ -21,14 +21,15 @@ class QFUtils(FieldUtils):
             self,
             g=None,
             G=None,
-            testing=False
+            testing=False,
+            dims=1
     ):
         super().__init__()
         if G is not None and g is None:
             self.g = GUtils(G=G)
         else:
             self.g=g
-
+        self.dims = dims
         self.field_utils = FieldUtils()
         # self.user_id = user_id
         self.metadata_path = "metadata"
@@ -246,7 +247,7 @@ class QFUtils(FieldUtils):
         # create batch attrs PER DIM
         field_value = self.batch_field_single(
             ntype,
-            dim=1,
+            dim=self.dims,
         )
         shape = [get_shape(v) for v in field_value.values()]
         # set axis def

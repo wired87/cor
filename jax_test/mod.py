@@ -97,9 +97,6 @@ class Node(nnx.Module):
             eq_idx,
             t=0
     ):
-        print("Call step...")
-        print("eq_idx", eq_idx)
-        print("in_axes_def", in_axes_def)
 
         try:
             result = self.core(
@@ -107,7 +104,6 @@ class Node(nnx.Module):
                 precomputed_grid,
                 in_axes_def,
             )
-            print("result", result)
             return result
         except Exception as e:
             # CHAR: return scalar for scan/stack; avoid "Err" prefix in stdout
@@ -121,7 +117,7 @@ class Node(nnx.Module):
         precomputed_grid,
         in_axes_def,
     ):
-        print("process_equation...")
+        #print("process_equation...")
 
         def _calc(*item):
             # precomputed_grid rows are (d_model,); NaN means "recompute" (use placeholder for uniform shape)
@@ -130,8 +126,6 @@ class Node(nnx.Module):
             print("bres", bres)"""
 
             result = self.runnable(*item)
-
-            print("_calc result", result)
             return result
 
         kernel = jax.vmap(
@@ -144,7 +138,7 @@ class Node(nnx.Module):
             *unprocessed_in
         )
 
-        print("process_equation... done")
+        #print("process_equation... done")
         return result
 
 

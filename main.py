@@ -1,27 +1,15 @@
-"""
-Create CFG from Module G
-Simulate (JAX)
-color_master: after each run, indexed + legacy 3D viz (default) under visualization_dir or
-repo color_master_output; result may include base64 from those folders. Off: run_visualization=False
-or COLOR_MASTER_VIZ=0. Path-only replay: run_color_master_from_config("sim_cfg.json") after sim.
-
-Log refs: Node.__call__.cor, calc_batch, save_t_step, stack_tdb…
-"""
-import jax.numpy as jnp
 import os
 import pprint
 import sys
 import json
 import base64
-import tempfile
-from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
 
-import flax
+from pathlib import Path
+from typing import Optional, Dict, Any, Tuple
+
 import numpy as np
 
 from firegraph.graph import GUtils
-from firegraph.utils.deserialize import deserialize
 from guard import Guard as CG
 from in_parser import convert_img_to_energy_map
 from injector import Injector
@@ -29,21 +17,6 @@ from injector import Injector
 from qfu.qf_utils import QFUtils
 from sm_manager.sm_manager import SMManager
 from jax_test.guard import JaxGuard
-
-
-
-from color_master.main import (
-_demo_input_data,
-QUALITY_LIGHT,
-build_3d_time_series_visualization,
-build_indexed_viz_from_engine_dict,
-)
-from color_master.sim_bridge import (
-collect_engine_payload_from_jax_guard,
-collect_series_from_jax_guard,
-run_workflow_visualization,
-)
-
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _REPO_ROOT not in sys.path:
@@ -105,7 +78,6 @@ def _slurp_visualizations(tmp_out_dir: str) -> Dict[str, Any]:
                 "mime": "image/gif",
                 "b64": _b64(p.read_bytes()),
             }
-
     return out
 
 
@@ -134,14 +106,7 @@ def run_color_master_from_config(
     return run_path_based_viz(sim_cfg_path)
 
 
-def _parse_inj_cfg(inj_cfg: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """
-    inj_cfg (single MCP payload field) supports:
-      - {"json": { ... }}  — overlay dict
-      - {"b64": "<base64>"} — UTF-8 JSON text after decode
-      - {"text": "<json string>"}
-      - { ... } — bare dict treated as overlay (no wrapper keys)
-    """
+def _parse_inj_cfg(inj_cfg: Optional[Dict[str, Any]]):
     if not inj_cfg:
         return None, None
     if not isinstance(inj_cfg, dict):
@@ -163,7 +128,6 @@ def _parse_inj_cfg(inj_cfg: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str
             if not isinstance(data, dict):
                 return None, "inj_cfg.text must parse to a JSON object"
             return data, None
-        # gien: whole object is the overlay (no b64/text/json wrapper).
         return dict(inj_cfg), None
     except Exception as exc:
         print(f"Err main::_parse_inj_cfg | handler_line=123 | {type(exc).__name__}: {exc}")
@@ -171,7 +135,9 @@ def _parse_inj_cfg(inj_cfg: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str
         return None, repr(exc)
 
 def visualize() -> Optional[Dict[str, Any]]:
-    sim_results = json.loads(open("local.json", "r").read())
+    sim_results = json.loads(
+        open("local.json", "r").read()
+    )
     print("SIM RESULTS, CFG LOAD...")
     serialized_f_out = np.frombuffer(
         base64.b64decode(sim_results["serialized_f_out"]),
@@ -224,11 +190,8 @@ def run_main_process(
 
     # Build G
     g = GUtils()
-    qfu = QFUtils(G=g.G)
+    qfu = QFUtils(G=g.G, dims=dims)
     injector = Injector(g, amount_nodes)
-
-    # DEFAULT INJECTION PATTERN
-    fields = ["ELECTRON", "PHOTON"]
 
     # BUILD SM
     _step("workflow.graph.initialize.start")
@@ -247,15 +210,7 @@ def run_main_process(
 
     jax_guard = JaxGuard(cfg=components).main()
 
-    _local_json = os.path.join(_REPO_ROOT, "local.json")
-    result: Dict[str, Any] = {
-        "ok": True,
-        "jax_ok": jax_guard is not None,
-        "user_id": user_id,
-        "local_json": _local_json if os.path.isfile(_local_json) else None,
-    }
     _step("visualization.run.start")
-
     result["visualizations"] = visualize()
     return result
 
@@ -272,3 +227,19 @@ if __name__ == "__main__":
             inj_cfg=item
         )
 
+"""
+
+
+from color_master.main import (
+_demo_input_data,
+QUALITY_LIGHT,
+build_3d_time_series_visualization,
+build_indexed_viz_from_engine_dict,
+)
+from color_master.sim_bridge import (
+collect_engine_payload_from_jax_guard,
+collect_series_from_jax_guard,
+run_workflow_visualization,
+)
+
+"""

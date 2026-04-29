@@ -220,25 +220,7 @@ class Injector(
     ) -> None:
         # ganzer cpu processing stuff wird relay frontend:
         # pi:t:e
-        #
         # tod later make docker image for gpu and cpu!
-
-        """
-        Set inj pattern for the Injector workflow.
-
-        Workflow:
-        1. Reads and normalizes the incoming inputs, including `inj_struct`.
-        2. Builds intermediate state such as `modules`, `mid`, `keys` before applying the main logic.
-        3. Branches on validation or runtime state to choose the next workflow path.
-        4. Delegates side effects or helper work through `self.g.get_nodes()`, `enumerate()`, `self.g.get_neighbor_list()`.
-        5. Finishes by updating state, triggering side effects, or completing the workflow without a direct return value.
-
-        Inputs:
-        - `inj_struct`: Caller-supplied value used during processing. Expected type: `dict[str, list[tuple[tuple[int], list[list[int], list[int]]]]]`.
-
-        Returns:
-        - Returns `list[int, tuple[tuple, float]]` to the caller.
-        """
         print("Injections compound to graph...")
         try:
             modules = self.g.get_nodes(

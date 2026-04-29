@@ -84,12 +84,9 @@ class JaxGuard:
 
     def main(self):
         serialized_raw_out, serialized_f_out = self.gnn_layer.main()
-
         self._export_engine_state(
             serialized_raw_out, serialized_f_out
         )
-
-        # results = self.finish()
         print("SIMULATION PROCESS FINISHED")
         return self
 

@@ -21,6 +21,8 @@ class FeatureEncoder(eqx.Module):
     out_store: List[Any]
     out_skeleton: List[Any]
     in_skeleton: List[Any]
+    out_f_store: List
+    in_f_store: List
     in_ts: List[Any]
     in_linears: List[Any]
     out_linears: List[Any]
@@ -46,24 +48,18 @@ class FeatureEncoder(eqx.Module):
         # keep list and not flatten since
         self.in_store = []
         self.out_store = []
+        self.result_blur = .9
 
         #
         self.out_skeleton = []
         self.in_skeleton = []
         self.in_ts = []  # CHANGED: gnn.py serialize() expects feature_encoder.in_ts
 
-        self.in_linears = []
-
-        #
-        self.out_linears = [] # get set in create_out_linears_process
-        self.out_feature_store = []
-
-        self.result_blur = .9
-
+        self.in_linears = [[] for _ in range(len(METHODS))]
+        self.out_linears = [[] for _ in range(len(METHODS))]
+        self.out_f_store = []
+        self.in_f_store = [[] for _ in range(len(METHODS))]
         self.feature_controller = []
-
-
-
 
 
     def create_out_features(
@@ -71,18 +67,11 @@ class FeatureEncoder(eqx.Module):
             output, # represent grid for each variation list[grid]
             eq_idx,
     ):
-        """
-        Stack results to out_f_store (123,123,123) apply later (existing) operation
-        for (111,222,333) -> just append resutls in create_out_features, saves t in rt
-        """
         print("FeatureEncoder.out_processor...")
         try:
-            for grid in output:
-                results = self.gen_out_feature_single_variation(
-                    grid,
-                    out_linear=self.out_linears[eq_idx],
-                )
-                self.out_feature_store[eq_idx].extend(results)
+            for i, (grid, linear_item) in enumerate(zip(output, self.out_linears[eq_idx])):
+                results = vmap(linear_item)(grid)
+                self.out_f_store[eq_idx][i].extend(results)
         except Exception as e:
             print("Err FeatureEncoder.out_processor:", e)
         print("FeatureEncoder.out_processor... done")
@@ -156,18 +145,6 @@ class FeatureEncoder(eqx.Module):
         return features
 
 
-    def gen_out_feature_single_variation(
-        self,
-        param_grid, # represent all params
-        out_linear
-    ):
-        """For each result withi the param grid, create embeddings -> return array"""
-        grid_embeds =  []
-        for item in param_grid:
-            embedding = out_linear(item)
-            grid_embeds.append(embedding)
-        print("gen_feature_single_variation... done")
-        return grid_embeds
 
 
 
@@ -191,16 +168,13 @@ class FeatureEncoder(eqx.Module):
         except Exception as e:
             print("Err _save_in_feature_method_grid", e)
 
-    def build_single_linear(self, ilen):
-        print("build_single...")
+    def build_single_linear(self, ilen, eq_idx):
         linear = eqx.nn.Linear(
-            in_features=ilen,
-            # dimensions for the model
+            in_features=len(ilen),
             out_features=self.d_model,
             key=self.rngs,
         )
-        print("build_single... done")
-        self.in_linears.append(linear)
+        self.in_linears[eq_idx].append(linear)
 
 
     def create_in_features(
@@ -208,28 +182,18 @@ class FeatureEncoder(eqx.Module):
             inputs,
             eq_idx=0,
     ):
-        print("create_in_features for", eq_idx)
+        #
         try:
-            results = []
-            linear_instance = self.linears[eq_idx]
-            for variation_input in inputs:
-                feature = jax.nn.gelu(
-                    linear_instance(
-                        jnp.array(variation_input)
-                    )
-                )
-                results.append(feature)
-            return results
+            for variation_grid, linear_item in zip(inputs, self.in_linears[eq_idx]):
+                results = vmap(linear_item)(variation_grid)
+                for i, item in enumerate(results):
+                    self.in_f_store[eq_idx][i].extend(results)
         except Exception as e:
             print("Err create_in_features:", e)
-        print("create_in_features... done")
-        return None
 
-    def save_features(self, all_features):
-        """SAVE ALL FEATURES FOR SINGLE ITER ALL EQ"""
-        for i, feature in enumerate(all_features):
-            self.features[i].append(feature)
-        print("FEATURES SAVED SUCCESSFULLY...")
+
+
+
 
     def blur_result_from_in_tree(
             self,
@@ -389,81 +353,13 @@ class FeatureEncoder(eqx.Module):
 
     def create_out_linear(
             self,
-            feature_example
+            feature_example:int # important
     ):
-        print("create_out_linears...")
-
         self.out_linears.append(
             eqx.nn.Linear(
-                in_features=feature_example ,
+                in_features=feature_example,
                 out_features=self.d_model,
                 key=self.rngs
             )
         )
-        self.out_feature_store.append([])
-        print("create_out_linears... done")
-
-"""
-self._save_in_feature_method_grid(
-    f_in_results,
-    eq_idx,
-    item_idx,
-)
-
-
-def build_linears(
-        self,
-        eq_idx,
-        unscaled_db_len,
-):
-    print(f"build_linears for {eq_idx}...")
-    for item in unscaled_db_len:
-        item = jnp.atleast_1d(jnp.asarray(item))
-        merged_item = jnp.ravel(item)
-        self.build_single(
-            ilen=merged_item
-        )
-    self.in_linears.append(linear)
-    print(f"build_linears... done")
-
-
-
-    def create_out_linears(
-            self,
-            unscaled_db_len,
-            feature_len_per_out,
-    ):
-        print("create_out_linears...")
-
-        def _flat_ints(x):
-            a = jnp.ravel(jnp.asarray(x))
-            if a.size == 0:
-                return []
-            return [int(a[i]) for i in range(int(a.size))]
-
-        u_dims = _flat_ints(unscaled_db_len)
-        f_counts = _flat_ints(feature_len_per_out)
-        n = max(len(u_dims), len(f_counts), 1)
-        if len(u_dims) < n:
-            u_dims = u_dims + [1] * (n - len(u_dims))
-        if len(f_counts) < n:
-            f_counts = f_counts + [1] * (n - len(f_counts))
-
-        linears= []
-        for in_dim, amount_features in zip(u_dims, f_counts):
-            in_dim = max(1, int(in_dim))
-            amount_features = max(0, int(amount_features))
-            linears.extend([
-                eqx.nn.Linear(
-                    in_features=in_dim,
-                    out_features=self.d_model,
-                    key=self.rngs
-                )
-                for _ in range(amount_features)
-            ])
-
-        
-        self.out_linears.append(linears)
-        self.out_feature_store.append([])
-        print("create_out_linears... done")
-"""
+        self.out_f_store.append([])

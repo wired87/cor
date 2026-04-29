@@ -504,15 +504,16 @@ class DBLayer:
 
 
     def get_abs_unscaled_db_idx(self, coord_struct_with_tdim):
-        print("get_abs_unscaled_db_idx...")
+        #print("get_abs_unscaled_db_idx...")
         abs_unscaled_db_idx = []
-
-        for coord in coord_struct_with_tdim:
-            coord_exclude_time = coord[1:]
-            db_idx = self.get_rel_db_index(*coord_exclude_time)
-            abs_unscaled_db_idx.append(db_idx)
-
-        print("get_abs_unscaled_db_idx... done")
+        try:
+            for coord in coord_struct_with_tdim:
+                #print("work coord", coord)
+                coord_exclude_time = coord[1:]
+                db_idx = self.get_rel_db_index(*coord_exclude_time)
+                abs_unscaled_db_idx.append(db_idx)
+        except Exception as e:
+            print("Err get_abs_unscaled_db_idx:", e)
         return abs_unscaled_db_idx
 
 
@@ -529,7 +530,6 @@ class DBLayer:
         return all_shape, abs_un_idx
 
     def get_axis_shape(self, example_variation):
-        print("get_axis_shape", example_variation)
         all_ax = []
         all_shape = []
 
@@ -753,8 +753,6 @@ class DBLayer:
         if axis == 0:
             return vmap(_wrapper, in_axes=0)(batch)
         return jnp.take(ctrl, batch)
-
-
 
 
     def batch_len_scaled(self, batch, axis):
