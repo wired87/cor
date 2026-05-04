@@ -1,0 +1,11 @@
+fastmcp
+numpy
+matplotlib
+networkx
+jax
+orbax-checkpoint<=0.11.32
+flax
+equinox
+tqdm
+pyvis
+

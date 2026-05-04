@@ -1,0 +1,986 @@
+import jax
+import jax.numpy as jnp
+from Tools.demo.sortvisu import Array
+from jax import jit, vmap
+import numpy as np
+
+from jax import ops
+from jax_test.dtypes import TimeMap
+
+
+class DBLayer:
+
+    def  __init__(
+            self,
+            gpu,
+            METHODS_PER_MOD_LEN_CTLR,
+            DB_TO_METHOD_EDGES,
+            METHOD_TO_DB,
+            AXIS,
+            DB,
+            AMOUNT_PARAMS_PER_FIELD,
+            DB_SHAPE,
+            DB_PARAM_CONTROLLER,
+            DIMS,
+            FIELDS,
+            DB_CTL_VARIATION_LEN_PER_FIELD,
+            LEN_FEATURES_PER_EQ,
+            SIM_TIME,
+            **cfg
+    ):
+        # DB Load and parse
+        self.DB = DB
+
+        self.AXIS = AXIS
+
+        self.SCALED_PARAMS = []
+        self.nodes = []
+
+        self.AMOUNT_PARAMS_PER_FIELD = jnp.asarray(
+            AMOUNT_PARAMS_PER_FIELD,
+            dtype=jnp.int64,
+        )
+
+        self.DB_PARAM_CONTROLLER = jnp.asarray(DB_PARAM_CONTROLLER, dtype=jnp.int64)
+        self.DB_SHAPE = DB_SHAPE
+
+        # len fields per mod
+        self.FIELDS = jnp.array(FIELDS)
+
+        self.METHODS_PER_MOD_LEN_CTLR = jnp.array(METHODS_PER_MOD_LEN_CTLR, jnp.int64)
+        self.METHOD_TO_DB = jnp.array(METHOD_TO_DB, dtype=jnp.int64)
+        self.DB_TO_METHOD_EDGES = jnp.asarray(DB_TO_METHOD_EDGES, dtype=jnp.int64)
+
+        # convert bytes array
+        self.SCALED_PARAMS:list[int] = []
+        self.DB_CTL_VARIATION_LEN_PER_FIELD = jnp.array(
+            DB_CTL_VARIATION_LEN_PER_FIELD,
+            jnp.int64
+        )
+
+        self.FIELDS_CUMSUM = jnp.concatenate([
+            jnp.array([0]),
+            jnp.cumsum(jnp.array(self.FIELDS))
+        ])
+
+        self.AMOUNT_PARAMS_PER_FIELD_CUMSUM = jnp.concatenate([
+            jnp.array([0]),
+            jnp.cumsum(self.AMOUNT_PARAMS_PER_FIELD)
+        ])
+
+        self.DB_PARAM_CONTROLLER_CUMSUM = jnp.concatenate([
+            jnp.array([0]),
+            jnp.cumsum(self.DB_PARAM_CONTROLLER)
+        ])
+
+        # PRE COMPUTE SHAPES AND IDX FOR SIMPLIFIED ARG PSSSING IN RT
+        self.OUT_SHAPES, self.OUT_SHAPE_REL_DB_IDX = self.get_shapes(
+            coords=self.METHOD_TO_DB
+        )
+        self.SIM_TIME = SIM_TIME
+        self.LEN_FEATURES_PER_EQ = LEN_FEATURES_PER_EQ
+        self.gpu = gpu
+        self.DIMS = DIMS
+        self.history_nodes = []
+
+        self.param_values_history: dict[int, list[float]] = {}
+        self.param_features_history: dict[int, list[float]] = {}
+
+        # For sum_results: arange over equations (same length as LEN_FEATURES_PER_EQ).
+        self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM = len(LEN_FEATURES_PER_EQ)
+        self.in_features=[]
+        self.out_idx_map = []
+        self.store = []
+        self.out_f_store = []
+
+        self.out_store = []
+
+
+    def build_db(self, amount_nodes):
+        jax.debug.print("build_db...")
+        ndims = int(jnp.ravel(self.DIMS)[0]) if hasattr(self.DIMS, "ravel") else int(self.DIMS)
+        try:
+            for i, ax in enumerate(self.AXIS):
+                start_param_count = jnp.take(
+                    self.DB_PARAM_CONTROLLER_CUMSUM,
+                    i,
+                )
+
+                len_unscaled_param = jnp.int64(
+                    self.DB_PARAM_CONTROLLER[i]
+                )
+
+                single_param_value = jax.lax.dynamic_slice_in_dim(
+                    self.DB,
+                    start_param_count,
+                    len_unscaled_param,
+                )
+
+                if ax is None or ax == 0:
+                    slice = jnp.tile(
+                        single_param_value,
+                        amount_nodes * ndims, # STORE GRID 1d
+                    )
+                    self.nodes.extend(slice)
+                    self.SCALED_PARAMS.append(len(slice))
+                else:
+                    self.nodes.extend(single_param_value)
+                    self.SCALED_PARAMS.append(len_unscaled_param)
+
+        except Exception as e:
+            print("Err build_db", e)
+
+        self.nodes = jnp.array(self.nodes)
+
+        self.SCALED_PARAMS = jnp.array(self.SCALED_PARAMS)
+
+        self.SCALED_PARAMS_CUMSUM = jnp.concatenate([
+            jnp.array([0]),
+            jnp.cumsum(self.SCALED_PARAMS)
+        ])
+
+        self.SCALED_PARAMS_CUMSUM_UNPADDED = jnp.cumsum(self.SCALED_PARAMS)
+
+        # UNSCALED
+        self.UNSCALED_CUMSUM_PADDED = jnp.concatenate([
+            jnp.array([0]),
+            jnp.cumsum(self.DB_PARAM_CONTROLLER)
+        ])
+
+        #
+        self.tdb = [self.nodes if i == 0 else [] for i in range(self.SIM_TIME)]
+        self.tdb = jax.device_put(
+            self.tdb,
+            self.gpu,
+        )
+
+        self.time_construct = jnp.array(
+            [
+                self.nodes,
+                self.nodes,
+            ]
+        )
+
+        #
+        self.time_construct = jax.device_put(
+            self.time_construct,
+            self.gpu
+        )
+
+        #
+        self.out_shapes_sum = []
+        jax.debug.print("build_db... done")
+
+
+
+    def divide_time_values_all_dims(self, divisor):
+        """
+        Divide all time values across dims by divisor (scalar or broadcastable).
+        Updates self.tdb and self.time_construct in place via reassignment.
+        """
+        divisor = jnp.asarray(divisor, dtype=jnp.float32)
+        if hasattr(self.tdb, "at"):
+            self.tdb = self.tdb / divisor
+        else:
+            self.tdb = jax.tree_util.tree_map(
+                lambda arr: jnp.asarray(arr, dtype=jnp.float32) / divisor,
+                self.tdb,
+            )
+        self.time_construct = self.time_construct / divisor
+
+
+
+    def create_out_idx_map(self):
+        # pre set idx map for faster sortin in run time
+        def get_rel_db_idx(coord):
+            print("get_rel_db_idx coord", coord)
+            c = jnp.ravel(jnp.asarray(coord))
+            return self.get_rel_db_index(c[-3], c[-2], c[-1])
+
+        print("stack_tdb: mapping indices via vmap...")
+        self.out_idx_map = vmap(get_rel_db_idx, in_axes=0)(
+            self.METHOD_TO_DB
+        )
+
+    def save_in(self, in_features):
+        """
+        stack created in embeddings to list
+        todo save raw in
+        """
+        try:
+            for i, item in enumerate(in_features):
+                # gien: first timestep — grow per-slot buckets (was empty list → index errors)
+                while len(self.in_features) <= i:
+                    self.in_features.append([])
+                self.in_features[i].append(item)
+            print("save in... done")
+        except Exception as e:
+            print("Err save_in", e)
+
+    def save_out(self, flatten_results, out_features):
+        # receive results single iter all eqs extend
+        try:
+            for i, (flat_result, embedding) in enumerate(zip(flatten_results, out_features)):
+                # gien: align with save_in — lazy-allocate per-method stores
+                while len(self.out_f_store) <= i:
+                    self.out_f_store.append([])
+                while len(self.out_store) <= i:
+                    self.out_store.append([])
+                self.out_f_store[i].append(embedding)
+                self.out_store[i].extend(flat_result)
+            print("save_out... done")
+        except Exception as e:
+            print("Err save_out", e)
+
+    def save_t_step(self, all_out_features, all_in_features, raw_out):
+        try:
+            jax.debug.print(f"save_t_step...")
+            self.save_in(all_in_features)
+
+            flatten_results:jnp.array = self.flatten_result(raw_out)
+            self.save_out(all_out_features, flatten_results)
+            sumed_results = self._sum_results_impl(flatten_results)
+            sumed_results = jnp.ravel(jnp.asarray(sumed_results, dtype=jnp.float32))
+
+            # switch live tdb
+            self.time_construct = self.time_construct.at[1].set(
+                self.time_construct[0]
+            )
+
+            # save results in live db
+            self.sort_results_rtdb(sumed_results)
+
+            #
+            self._update_param_time_series(sumed_results)
+
+            self.time_construct = self.time_construct.at[0].set(self.nodes)
+            jax.debug.print(f"save_t_step... done")
+        except Exception as e:
+            print("Err save_t_step", e)
+
+    def _update_param_time_series(self, sumed_results):
+        try:
+            sumed_results = jnp.ravel(jnp.asarray(sumed_results, dtype=jnp.float32))
+        except Exception:
+            return
+
+        try:
+            def _coord_to_abs_idx(coord):
+                c = jnp.ravel(jnp.asarray(coord))
+                if c.size < 3:
+                    return jnp.int32(0)
+                return self.get_rel_db_index(c[-3], c[-2], c[-1])
+
+            idx_map = vmap(_coord_to_abs_idx, in_axes=0)(self.METHOD_TO_DB)
+            idx_np = np.asarray(idx_map).ravel()
+            feat_np = np.asarray(sumed_results, dtype=np.float32).ravel()
+        except Exception:
+            return
+
+        if idx_np.size == 0 or feat_np.size == 0:
+            return
+
+        # Ensure lengths match by trimming/padding features.
+        n = idx_np.size
+        if feat_np.size < n:
+            feat_np = np.concatenate([feat_np, np.zeros(n - feat_np.size, dtype=np.float32)])
+        elif feat_np.size > n:
+            feat_np = feat_np[:n]
+
+        # Snapshot of current nodes as real-valued array for value summaries.
+        try:
+            nodes_arr = np.asarray(self.nodes)
+            if np.iscomplexobj(nodes_arr):
+                nodes_arr = np.abs(nodes_arr.astype(np.int64)).astype(np.float32)
+            else:
+                nodes_arr = nodes_arr.astype(np.float32)
+        except Exception:
+            print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=435 | Exception handler triggered")
+            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
+            nodes_arr = None
+
+        for abs_idx, feat_val in zip(idx_np, feat_np):
+            try:
+                p_idx = int(abs_idx)
+            except Exception:
+                print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=442 | Exception handler triggered")
+                print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
+                continue
+
+            # Feature history: one scalar per step.
+            try:
+                self.param_features_history.setdefault(p_idx, []).append(float(feat_val))
+            except Exception:
+                print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=449 | Exception handler triggered")
+                print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
+                pass
+
+            # Value history: scalar summary of current param slice in nodes.
+            if nodes_arr is None:
+                continue
+            try:
+                start, length = self.get_db_index(p_idx)
+                s = int(start)
+                ln = int(length)
+                if ln <= 0 or s < 0 or s + ln > nodes_arr.size:
+                    continue
+                slice_arr = nodes_arr[s:s + ln]
+                if slice_arr.size == 0:
+                    continue
+                val_scalar = float(np.mean(slice_arr))
+                self.param_values_history.setdefault(p_idx, []).append(val_scalar)
+            except Exception:
+                print("Err cor.jax_test.gnn.db_layer::DBLayer._update_param_time_series | handler_line=467 | Exception handler triggered")
+                print("[exception] cor.jax_test.gnn.db_layer.DBLayer._update_param_time_series: caught Exception")
+                continue
+
+    @jit
+    def scatter_results_to_db(self, results, db_start_idx):
+        """
+        Schreibt Berechnungs-Resultate zurück in den flachen DB-Buffer.
+
+        flat_db: Der aktuelle 1D Parameter-Buffer.
+        flat_axis: Der 1D Buffer mit den Achsen-Definitionen (0 oder None).
+        results: Das JNP-Array der neuen Werte (Länge: 1 oder amount_nodes).
+        db_start_idx: Der Start-Index im flat_db, wo die Ersetzung beginnt.
+        amount_nodes: Die Anzahl der räumlichen Knoten.
+        """
+
+        # 1. Bestimme die Achsen-Regel am Startpunkt (extended DB: slot index = dim*len(AXIS)+ax)
+        n_axis = self.AXIS.shape[0]
+        axis_rule = self.AXIS[db_start_idx % n_axis]
+
+        def update_field_block(db, res):
+            # Fall: axis == 0 -> Wir ersetzen einen Block der Länge n
+            # Wir nutzen dynamic_update_slice für maximale GPU-Performance
+            return jax.lax.dynamic_update_slice_in_dim(
+                db,
+                res.reshape(-1),  # Sicherstellen, dass es 1D ist
+                db_start_idx,
+                axis=0
+            )
+
+        def update_single_value(db, res):
+            # Fall: axis == None -> Wir ersetzen nur einen einzelnen Wert
+            # Falls das Resultat ein Vektor ist (z.B. durch Reduktion), nehmen wir den Durchschnitt
+            # oder das erste Element, je nach physikalischer Logik.
+            val = res[0] if res.ndim > 0 else res
+            return db.at[db_start_idx].set(val)
+
+        self.nodes = jax.lax.cond(
+            axis_rule == 0,
+            update_field_block,
+            update_single_value,
+            self.nodes,
+            results
+        )
+
+
+
+    def flat_item(
+            self,
+            coords,
+            item,
+    ):
+        abs_unscaled_param_idx = self.get_rel_db_index(*jnp.array(coords)[-3:])
+        _start, _len = self.get_db_index(abs_unscaled_param_idx)
+        flat = jnp.ravel(item)
+        return flat
+
+    def flatten_result(self, results) -> list | Array:
+        try:
+            def _to_1d(x):
+                # gien: failed node / partial pipeline may leave None in raw_out batch
+                if x is None:
+                    return jnp.zeros((1,), dtype=jnp.float32)
+                a = jnp.asarray(x)
+                if a.ndim == 0:
+                    return jnp.reshape(a, (1,)).astype(jnp.float32)
+                return jnp.ravel(a).astype(jnp.float32)
+
+            # gien: `all_outs` is a Python list of per-eq outputs — vmap needs rank ≥ 1
+            if isinstance(results, (list, tuple)):
+                if not results:
+                    return jnp.zeros((0, 1), dtype=jnp.float32)
+                rows = [_to_1d(x) for x in results]
+                m = max(int(r.shape[0]) for r in rows)
+                if m <= 0:
+                    return jnp.zeros((len(rows), 1), dtype=jnp.float32)
+                padded = [
+                    jnp.pad(r, (0, m - int(r.shape[0]))) if int(r.shape[0]) < m else r
+                    for r in rows
+                ]
+                return jnp.stack(padded, axis=0)
+
+            r0 = jnp.asarray(results)
+            if r0.ndim == 0:
+                return _to_1d(r0).reshape(1, -1)
+            return vmap(_to_1d, in_axes=0)(r0)
+        except Exception as e:
+            print("Err flatten_result:", e)
+            return results
+
+    def sort_results_rtdb(
+            self,
+            flatten_step_results, # list[response
+    ):
+        # SAVE RTDB FOR ENTIRE ITER
+        jax.debug.print("sort_results_rtdb... ")
+        nodes = self.nodes
+
+        def apply_one(
+                nodes,
+                payload
+        ):
+            # get abs scaled idx
+            coords, flattened_item = payload
+
+            abs_unscaled_param_idx = self.get_rel_db_index(*jnp.array(coords)[-3:])
+            _start, _len = self.get_db_index(abs_unscaled_param_idx)
+
+            #
+            flat = jnp.reshape(jnp.asarray(flattened_item, dtype=nodes.dtype), (-1,))
+            nd = nodes.ndim
+            s = jnp.ravel(jnp.asarray(_start))
+            start_indices = (s[0],) * nd if nd >= 1 else ()
+
+            # apply result to db
+            nodes = jax.lax.dynamic_update_slice(
+                nodes, # 1d arr
+                flat,
+                start_indices
+            )
+            return nodes, None
+
+        # Loop and apply Results
+        nodes, _ = jax.lax.scan(
+            apply_one,
+            nodes,
+            (
+                self.METHOD_TO_DB,
+                flatten_step_results
+            )
+        )
+        #
+        self.nodes = nodes
+        jax.debug.print("sort_results_rtdb... done")
+
+
+
+    def get_abs_shape_idx(self, mod_idx, fidx, pidx):
+        """
+        GET ABS PATH for a single param unscaled
+        todo merge and improve
+        """
+        jax.debug.print("extract_shape... ")
+        # sum amount equations till current + all their fields
+        # get amount fields
+
+        indices = jnp.arange(len(self.FIELDS))
+        mask = indices < mod_idx
+        amount_fields = jnp.sum(
+            jnp.where(mask, self.FIELDS, 0))
+        print("amount_fields", amount_fields)
+
+        # get abs fiedld idx
+        amount_fields += fidx
+
+        # get relative amount params till field
+        indices = jnp.arange(len(self.AMOUNT_PARAMS_PER_FIELD))
+        mask = indices < amount_fields
+
+        amount_params_pre_fidx = jnp.sum(
+            jnp.where(mask, self.AMOUNT_PARAMS_PER_FIELD, 0))
+
+        # calc relative field idx to abs field idx sum
+        abs_param_idx = amount_params_pre_fidx + pidx
+
+        jax.debug.print("shape set...")
+        return abs_param_idx
+
+
+    def extract_shape(self, mod_idx, fidx, pidx):
+        """
+        for SINGLE param
+        pidx, fidx = dynamic
+        todo merge and improve
+        """
+        jax.debug.print("extract_shape... ")
+        # sum amount equations till current + all their fields
+        # get amount fields
+
+        indices = jnp.arange(len(self.FIELDS))
+        mask = indices < mod_idx
+        amount_fields = jnp.sum(
+            jnp.where(
+                mask,
+                self.FIELDS,
+                0
+            ))
+
+        # get abs fiedld idx
+        amount_fields += fidx
+
+        # get relative amount params till field
+        indices = jnp.arange(len(self.AMOUNT_PARAMS_PER_FIELD))
+        mask = indices < amount_fields
+        amount_params_pre_fidx = jnp.sum(
+            jnp.where(mask, self.AMOUNT_PARAMS_PER_FIELD, 0
+                      ))
+
+        # calc relative field idx to abs field idx sum
+        abs_param_idx = amount_params_pre_fidx + pidx
+
+        shape = jnp.array(self.DB_SHAPE)[abs_param_idx]
+
+        jax.debug.print("shape set...")
+        return shape
+
+
+    def get_abs_unscaled_db_idx(self, coord_struct_with_tdim):
+        #print("get_abs_unscaled_db_idx...")
+        abs_unscaled_db_idx = []
+        try:
+            for coord in coord_struct_with_tdim:
+                #print("work coord", coord)
+                coord_exclude_time = coord[1:]
+                db_idx = self.get_rel_db_index(*coord_exclude_time)
+                abs_unscaled_db_idx.append(db_idx)
+        except Exception as e:
+            print("Err get_abs_unscaled_db_idx:", e)
+        return abs_unscaled_db_idx
+
+
+    def get_shapes(self, coords):
+        print("get_shapes...")
+        all_shape = []
+        abs_un_idx = self.get_abs_unscaled_db_idx(coords)
+
+        for idx in abs_un_idx:
+            #print("abs_un_idx", idx)
+            shape = self.DB_SHAPE[jnp.array(idx)]
+            all_shape.append(shape)
+
+        return all_shape, abs_un_idx
+
+    def get_axis_shape(self, example_variation):
+        all_ax = []
+        all_shape = []
+
+        abs_un_idx = self.get_abs_unscaled_db_idx(example_variation)
+
+        def _seq_len(x):
+            if x is None:
+                return 0
+            if isinstance(x, (list, tuple)):
+                return len(x)
+            return int(jnp.size(jnp.asarray(x)))
+
+        n_ax = _seq_len(self.AXIS)
+        n_sh = _seq_len(self.DB_SHAPE)
+        if n_ax == 0 or n_sh == 0:
+            for _ in abs_un_idx:
+                all_ax.append(0)
+                all_shape.append((1,))
+            return all_ax, all_shape
+
+        for idx in abs_un_idx:
+            ii = int(jnp.asarray(idx).ravel()[0])
+            if ii < 0 or ii >= n_ax or ii >= n_sh:
+                all_ax.append(0)
+                all_shape.append((1,))
+                continue
+            axis = self.AXIS[ii]
+            shape = self.DB_SHAPE[ii]
+            # gien: injected config may use None as AXIS/DB_SHAPE placeholder — avoid jnp.asarray(None) downstream
+            if axis is None:
+                axis = 0
+            if shape is None:
+                shape = (1,)
+            all_ax.append(axis)
+            all_shape.append(shape)
+        return all_ax, all_shape
+
+    def get_rel_db_index(self, mod_idx, field_idx, rel_param_idx):
+        #print("get_rel_db_index...", mod_idx, field_idx)
+        # PREV FIELDS
+        all_fields_preset = jnp.take(
+            self.FIELDS_CUMSUM,
+            mod_idx,
+        )
+        #print("all_fields_preset", all_fields_preset)
+
+        # ABS FIELD IDX
+        total_fields_idx = all_fields_preset + field_idx
+        #print("total_fields_idx", total_fields_idx)
+
+        # PREV PARAMS
+        field_param_start_idx = jnp.take(
+            self.AMOUNT_PARAMS_PER_FIELD_CUMSUM,
+            total_fields_idx
+        )
+        #print("field_param_start_idx", field_param_start_idx)
+
+        abs_unscaled_param_idx = field_param_start_idx + rel_param_idx
+        #print("abs_param_idx", abs_unscaled_param_idx)
+        #print("get_rel_db_index... done")
+        return abs_unscaled_param_idx
+
+
+
+
+    def get_db_index(self, abs_unscaled_param_idx):
+        """
+        field_param_start_idx = jnp.take(
+            self.AMOUNT_PARAMS_PER_FIELD_CUMSUM,
+            jnp.arange(total_fields_idx)
+        )
+        """
+        #print(f"get_db_index...")
+
+        # SCALED ABS IDX
+        abs_param_start_idx = jnp.take(
+            self.SCALED_PARAMS_CUMSUM,
+            abs_unscaled_param_idx
+        )
+
+        #
+        field_param_end_idx = jnp.take(
+            self.SCALED_PARAMS_CUMSUM_UNPADDED,
+            abs_unscaled_param_idx
+        )
+        #print("field_param_end_idx", field_param_end_idx)
+
+        #
+        slice_len = field_param_end_idx - abs_param_start_idx
+        #print("slice_len", slice_len)
+        # DB_PARAM_CONTROLLER#
+        #print("db_idx xtct.. done")
+        return abs_param_start_idx, slice_len
+
+
+
+    def extract_field_param_variation(
+            self,
+            coords_eq_param_grids
+    ):
+        """
+        Extrahiert Parameter-Blöcke aus der DB und summiert Variationen auf.
+        db_indices: list[tuple] - [Variation_Index][Parameter_Index]
+        todo unter 3d tuple speichern
+        """
+        jax.debug.print("Summating Field Parameters...")
+        variation_param_idx = jnp.array(coords_eq_param_grids)
+        print("variation_param_idx", variation_param_idx)
+
+        # get array of all flat values
+        flattened_method_param_grid_for_all_variations = jax.vmap(
+            self.extract_flattened_grid,
+            in_axes=0
+        )(variation_param_idx)
+
+
+        jax.debug.print("extract_field_param_variation...")
+        return flattened_method_param_grid_for_all_variations
+
+
+    def extract_flattened_grid(
+            self,
+            item,
+    ):
+        # Extract single parameter flatten grid from db
+        #print("extract_flattened_grid")
+        time_dim, mod_idx, fidx, pidx = item
+
+        abs_unscaled_param_idx = self.get_rel_db_index(
+            mod_idx,
+            fidx,
+            pidx
+        )
+
+        _start, _len = self.get_db_index(
+            abs_unscaled_param_idx
+        )
+        # gien: zero-length scaled slices — dynamic_slice_in_dim can surface as integer modulo by zero
+        if int(jnp.asarray(_len).ravel()[0]) <= 0:
+            return jnp.asarray([0.0], dtype=jnp.float32)
+
+        # receive flatten entris
+        time_item = jnp.take(
+            self.time_construct,
+            time_dim,
+            axis=0
+        )
+        #print("time_item set...")
+
+        flatten_grid = jax.lax.dynamic_slice_in_dim(
+            # set t dim construct to chose from
+            # todo include algorithm to process all
+            # prev t-steps to a single one (in runtime)
+            time_item,
+            _start,
+            _len,
+            axis = 0
+        )
+        #print("extract_flattened_grid... done")
+        return flatten_grid
+
+
+
+    def get_rel_idx_batch(self, *inputs):
+        # print("self.SCALED_PARAMS_CUMSUM", self.SCALED_PARAMS_CUMSUM)
+        # get unscaled abs param idx
+        def xtract_single(mod_idx, field_idx, rel_param_idx):
+            abs_unscaled_param_idx = self.get_rel_db_index(
+                mod_idx,
+                field_idx,
+                rel_param_idx
+            )
+            return abs_unscaled_param_idx
+        return vmap(xtract_single, in_axes=0)(*inputs)
+
+
+    ### TODO LATER
+    def extract_active_nodes(self, graph) -> TimeMap:
+        """
+        Extract energy rich nodes (need for calculation)
+        mark: energy must be present i each field
+        wf:
+        use energy_map -> find energy param index for each field ->
+        identify e != 0 -> create node copy of "active" nodes
+        """
+
+        nodes=graph.nodes.copy()
+
+        for mindex, module in enumerate(self.energy_map):
+            for field_index, field_energy_param_index in enumerate(module):
+                # field_energy_param_index:int
+
+                # extract grid at path
+                energy_grid = nodes[
+                    tuple(
+                        mindex,
+                        field_index,
+                        field_energy_param_index
+                    )
+                ]
+                nonzero_indices = jnp.nonzero(energy_grid != 0)
+
+                pos_map = []
+                for index in nonzero_indices:
+                    pos_map.append(self.schema_grid[index])
+
+                # overwrite nodes with
+                nodes[mindex][field_index] = nonzero_indices
+
+
+        # tod not isolate new g -> jsut bring pattern in eq
+        # return "old_g" with
+        return TimeMap(
+            nodes,
+        )
+
+    def batch_len_unscaled(self, batch, axis):
+        ctrl = jnp.ravel(jnp.asarray(self.DB_PARAM_CONTROLLER))
+        if int(ctrl.size) == 0:
+            b = jnp.asarray(batch)
+            if axis == 0 and b.ndim >= 1:
+                return jnp.zeros((b.shape[0],), dtype=jnp.int32)
+            return jnp.int32(0)
+
+        def _wrapper(i):
+            return jnp.take(ctrl, i)
+
+        if axis == 0:
+            return vmap(_wrapper, in_axes=0)(batch)
+        return jnp.take(ctrl, batch)
+
+
+    def batch_len_scaled(self, batch, axis):
+        scaled_vals = jnp.ravel(jnp.asarray(self.SCALED_PARAMS))
+        if int(scaled_vals.size) == 0:
+            b = jnp.asarray(batch)
+            if axis == 0 and b.ndim >= 1:
+                return jnp.zeros((b.shape[0],), dtype=jnp.int32)
+            return jnp.int32(0)
+
+        def _wrapper(i):
+            return jnp.take(scaled_vals, i)
+
+        if axis == 0:
+            return vmap(_wrapper, in_axes=0)(batch)
+        return jnp.take(scaled_vals, batch)
+
+    def _sum_results_impl(self, flattened_eq_results):
+        print("sum_results...")
+        # gien: METHOD_TO_DB row count is the scatter target width — broken stub used list slice ends and returned early
+        n_methods = int(self.METHOD_TO_DB.shape[0]) if hasattr(self.METHOD_TO_DB, "shape") else len(self.METHOD_TO_DB)
+
+
+
+
+        def _sum(_slice):
+            return jnp.sum(jnp.array(_slice))
+
+        def process_eq_result_batch(eq_out_batch, eq_idx):
+            # print("process_eq_result_batch...")
+            try:
+                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
+                feature_lengths = [int(x) for x in feature_lengths]
+                block_count = len(feature_lengths)
+                total_len = sum(feature_lengths)
+                if block_count <= 0:
+                    return jnp.zeros((0,), dtype=jnp.float32)
+
+                # Normalize to 2D float32 without ever building an inhomogeneous array from 19 variable-length elements.
+                need_pad = False
+                try:
+                    arr = jnp.asarray(eq_out_batch, dtype=jnp.float32)
+                    if arr.ndim != 2:
+                        arr = jnp.reshape(arr, (1, -1))
+                    if getattr(arr.dtype, "kind", "") == "O" or (
+                            arr.ndim == 2 and arr.size > 0 and not jnp.issubdtype(arr.dtype, jnp.floating)):
+                        need_pad = True
+                except BaseException:
+                    print(
+                        "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=548 | BaseException handler triggered")
+                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught BaseException")
+                    need_pad = True
+                if need_pad:
+                    # Build iterable of elements without jnp.asarray(whole): 1D/2D array -> index; list -> iterate.
+                    if hasattr(eq_out_batch, "ndim"):
+                        n = eq_out_batch.shape[0] if eq_out_batch.ndim >= 1 else 1
+                        it = [eq_out_batch[i] for i in range(n)]
+                    elif hasattr(eq_out_batch, "__iter__"):
+                        it = list(eq_out_batch)
+                    else:
+                        it = [eq_out_batch]
+                    rows = []
+                    for x in it:
+                        try:
+                            r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
+                        except Exception:
+                            print(
+                                "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl.process_eq_result_batch | handler_line=564 | Exception handler triggered")
+                            print(
+                                "[exception] cor.jax_test.gnn.db_layer.DBLayer.process_eq_result_batch: caught Exception")
+                            r = jnp.zeros(1, dtype=jnp.float32)
+                        rows.append(r)
+                    if not rows:
+                        eq_out_batch = jnp.zeros((1, 1), dtype=jnp.float32)
+                    else:
+                        max_len = max(int(r.size) for r in rows)
+                        eq_out_batch = jnp.stack([
+                            jnp.concatenate(
+                                [r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[
+                                :max_len]
+                            for r in rows
+                        ])
+                else:
+                    eq_out_batch = arr
+                n_rows = eq_out_batch.shape[0]
+                if n_rows != total_len:
+                    flat = jnp.ravel(eq_out_batch)
+                    width = int(eq_out_batch.shape[1]) if eq_out_batch.ndim == 2 and int(
+                        eq_out_batch.shape[1]) > 0 else 1
+                    needed = total_len * width
+                    if flat.size < needed:
+                        flat = jnp.concatenate([flat, jnp.zeros(needed - int(flat.size), dtype=jnp.float32)])
+                    else:
+                        flat = flat[:needed]
+                    eq_out_batch = jnp.reshape(flat, (total_len, width))
+                repeats = jnp.asarray(feature_lengths, dtype=jnp.int32)
+                group_ids = jnp.repeat(jnp.arange(block_count, dtype=jnp.int32), repeats)
+                group_sums = ops.segment_sum(eq_out_batch, group_ids)
+                out = vmap(_sum, in_axes=0)(group_sums)
+                return jnp.ravel(jnp.asarray(out, dtype=jnp.float32))
+            except Exception as e:
+                print("Err process_eq_result_batch:", e)
+                feature_lengths = self.LEN_FEATURES_PER_EQ[eq_idx] if eq_idx < len(self.LEN_FEATURES_PER_EQ) else []
+                n = len(feature_lengths)
+                return jnp.zeros(max(1, n), dtype=jnp.float32)
+
+        def _to_2d_float32(batch):
+            try:
+                try:
+                    a = jnp.asarray(batch, dtype=jnp.float32)
+                    if a.ndim == 2 and a.size > 0 and jnp.issubdtype(a.dtype, jnp.floating):
+                        return a
+                except Exception as e:
+                    print("Err _to_2d_float32", e)
+                    pass
+                if hasattr(batch, "ndim") and batch.ndim >= 1:
+                    n = int(batch.shape[0])
+                    it = [batch[j] for j in range(n)]
+                elif hasattr(batch, "__iter__"):
+                    it = list(batch)
+                else:
+                    it = [batch]
+                rows = []
+                for x in it:
+                    try:
+                        r = jnp.ravel(jnp.asarray(x, dtype=jnp.float32))
+                    except Exception as e:
+                        print("Err2 _to_2d_float32", e)
+                        r = jnp.zeros(1, dtype=jnp.float32)
+                    rows.append(r)
+                if not rows:
+                    return jnp.zeros((0, 0), dtype=jnp.float32)
+                max_len = max(int(r.size) for r in rows)
+                return jnp.stack([
+                    jnp.concatenate(
+                        [r, jnp.zeros(max_len - int(r.size), dtype=jnp.float32)]) if r.size < max_len else r[:max_len]
+                    for r in rows
+                ])
+            except Exception as e:
+                print("Err", e)
+                return jnp.zeros((1, 1), dtype=jnp.float32)
+
+        flat_parts = []
+        try:
+            for i in range(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM):
+                eq_batch = flattened_eq_results[i] if i < len(flattened_eq_results) else jnp.zeros((0, 0))
+                eq_batch = _to_2d_float32(eq_batch)
+                try:
+                    part = process_eq_result_batch(eq_batch, i)
+                    p = jnp.ravel(jnp.asarray(part, dtype=jnp.float32))
+                except BaseException:
+                    print(
+                        "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=645 | BaseException handler triggered")
+                    print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
+                    n = len(self.LEN_FEATURES_PER_EQ[i]) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(
+                        self.LEN_FEATURES_PER_EQ) else 1
+                    p = jnp.zeros(max(1, n), dtype=jnp.float32)
+                flat_parts.append(p)
+        except BaseException:
+            # --- FIX: If anything in the loop raises (e.g. indexing flattened_eq_results), fill flat_parts with zeros. ---
+            print(
+                "Err cor.jax_test.gnn.db_layer::DBLayer._sum_results_impl | handler_line=650 | BaseException handler triggered")
+            print("[exception] cor.jax_test.gnn.db_layer.DBLayer._sum_results_impl: caught BaseException")
+            n_eq = int(self.DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM) if hasattr(self,
+                                                                                 "DB_CTL_VARIATION_LEN_PER_EQUATION_CUMSUM") else 1
+            flat_parts = [
+                jnp.zeros(
+                    max(1, len(self.LEN_FEATURES_PER_EQ[i])) if hasattr(self, "LEN_FEATURES_PER_EQ") and i < len(
+                        self.LEN_FEATURES_PER_EQ) else 1,
+                    dtype=jnp.float32,
+                )
+                for i in range(max(1, n_eq))
+            ]
+        if not flat_parts:
+            print("sum_results... done")
+            return jnp.array([])
+        # --- FIX: Build out from flat_parts without ever creating (19,) + inhomogeneous; on failure return zeros. ---
+        try:
+            out = jnp.ravel(jnp.asarray(flat_parts[0], dtype=jnp.float32))
+            for p in flat_parts[1:]:
+                out = jnp.concatenate([out, jnp.ravel(jnp.asarray(p, dtype=jnp.float32))])
+        except Exception as e:
+            print("sum_results... done (fallback zeros)", e)
+            return jnp.zeros(max(1, n_methods), dtype=jnp.float32)
+        if out.size < n_methods:
+            out = jnp.concatenate([out, jnp.zeros(n_methods - out.size, dtype=out.dtype)])
+        elif out.size > n_methods:
+            out = out[:n_methods]
+        print("sum_results... done")
+        return out

@@ -1,0 +1,7 @@
+.env
+test_out.json
+engine_output.json
+
+# embedding / vector store backups
+embed_backup/
+embeddings_backup/

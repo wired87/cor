@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.idea/
+
+color_master_output/
+output_dir/
+
+# keep embedded git metadata locally, but don't track it
+.git_embedded_backup/
+
+# embedding / vector store backups
+embed_backup/
+embeddings_backup/
+

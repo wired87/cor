@@ -1,0 +1,16 @@
+.git/
+.venv/
+venv/
+__pycache__/
+output_dir/
+embed_backup/
+embeddings_backup/
+.env
+*.md
+.idea/
+.vscode/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
