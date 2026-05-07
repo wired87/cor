@@ -38,5 +38,5 @@ python main.py
 
 The engine is designed to work with **all kinds of equations**, as long as:
 
-1. the equations are provided in the `equation` directory, and  
-2. required fields are added to `qfutils`.
+1. the equations are provided in the `sm_manager/arsenal` directory, and  
+2. required fields are integrated to `qfutils`. (todo make it kore user friendly)
