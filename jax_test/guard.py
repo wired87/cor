@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shutil
 import tempfile
 from typing import Any, Dict, List
 
@@ -53,6 +54,14 @@ def _sanitize_param_column_name(raw_id: str) -> str:
 
 
 class JaxGuard:
+    """JAX simulation orchestrator.
+
+    Prompt (2026-05-30): "create a output dir which includes sim output files (controller (ctlr)
+    and results) separated, sim config files and all other products of the sim." — `JaxGuard`
+    now lays out a single `output/` root with disjoint sub-folders (`results/`, `ctlr/`,
+    `config/`, `visualizations/`) plus a top-level `manifest.json`. Each `main()` call
+    re-exports into the same layout in-place; concerns stay separated for downstream consumers.
+    """
     # todo prevaliate features to avoid double calculations
     def __init__(self, cfg):
         #JAX
@@ -63,8 +72,11 @@ class JaxGuard:
         self.cfg = cfg
         print("cfg:")
 
-        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.save_path = os.path.join(_repo_root, "local.json")
+        # CHAR: structured output layout — `output/{results,ctlr,config,visualizations}/`.
+        # `self.save_path` is kept for backwards-compat with callers that referenced the old
+        # flat `output/results.json` path; it now points to the engine-state file inside
+        # `results/`. Sub-folders are created up-front so every export branch can write blindly.
+        self._init_output_layout()
 
         for k, v in self.cfg.items():
             self.cfg[k] = parse_value(v)
@@ -75,6 +87,21 @@ class JaxGuard:
             **self.cfg
         )
 
+    def _init_output_layout(self) -> None:
+        """Create the separated output directory structure for this run."""
+        # gien: anchor at repo root (one above `jax_test/`) so the layout is independent of CWD
+        _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.repo_root = _repo_root
+        self.out_root  = os.path.join(_repo_root, "output")
+        self.dir_results = os.path.join(self.out_root, "results")
+        self.dir_ctlr    = os.path.join(self.out_root, "ctlr")
+        self.dir_config  = os.path.join(self.out_root, "config")
+        self.dir_viz     = os.path.join(self.out_root, "visualizations")
+        for _d in (self.out_root, self.dir_results, self.dir_ctlr, self.dir_config, self.dir_viz):
+            os.makedirs(_d, exist_ok=True)
+        # canonical engine-state path (moved under `results/` — single source of truth)
+        self.save_path = os.path.join(self.dir_results, "engine_state.json")
+
     def divide_vector(self, vec, divisor):
         """Divide all values of a given vector by divisor. Returns array same shape as vec."""
         v = jnp.asarray(vec)
@@ -84,9 +111,16 @@ class JaxGuard:
 
     def main(self):
         serialized_raw_out, serialized_f_out = self.gnn_layer.main()
+        # CHAR: separated exports — config snapshot first (so it reflects what was consumed),
+        # then controller metadata, then engine state, then a top-level manifest pointing at
+        # everything that was produced. Each branch is wrapped in its own try/except inside the
+        # method so a single failing export cannot abort the others.
+        self._export_config_snapshot()
+        self._export_ctlr()
         self._export_engine_state(
             serialized_raw_out, serialized_f_out
         )
+        self._write_manifest()
         print("SIMULATION PROCESS FINISHED")
         return self
 
@@ -132,9 +166,79 @@ class JaxGuard:
         return {"db": db_ctlr, "model": model_ctlr}
 
     def _export_ctlr(self):
+        # CHAR: persist the DB + model controller bundles as two JSON files under `output/ctlr/`
+        # — keeps controller metadata cleanly separated from raw simulation results, so downstream
+        # consumers (visualizers, BQ uploaders) can load only what they need without touching the
+        # multi-MB engine_state.json.
         print("_export_ctlr...")
-        _ = self._build_ctlr_for_export()
-        print("_export_ctlr... done (local-only: no BigQuery)")
+        try:
+            bundle = self._build_ctlr_for_export()
+            with open(os.path.join(self.dir_ctlr, "db_ctlr.json"), "w", encoding="utf-8") as f:
+                json.dump(bundle["db"], f, indent=2)
+            with open(os.path.join(self.dir_ctlr, "model_ctlr.json"), "w", encoding="utf-8") as f:
+                json.dump(bundle["model"], f, indent=2)
+            print("_export_ctlr... done →", self.dir_ctlr)
+        except Exception as e:
+            print(f"Warn _export_ctlr: {type(e).__name__}: {e}")
+
+    def _export_config_snapshot(self):
+        # CHAR: snapshot every config artifact that materially affects the run so a `output/`
+        # directory is self-contained and reproducible. Three pieces:
+        #   - `sim_config.json`  — verbatim copy of the source file at repo root (if present)
+        #   - `components.json`  — the actual cfg dict consumed by the engine (post `parse_value`)
+        #   - `runtime.json`     — process-level knobs (AMOUNT_NODES, SIM_TIME, DIMS, ENV_ID, plat)
+        print("_export_config_snapshot...")
+        try:
+            src_cfg = os.path.join(self.repo_root, "sim_config.json")
+            if os.path.isfile(src_cfg):
+                shutil.copyfile(src_cfg, os.path.join(self.dir_config, "sim_config.json"))
+
+            with open(os.path.join(self.dir_config, "components.json"), "w", encoding="utf-8") as f:
+                json.dump(_to_json_serializable(self.cfg), f, indent=2)
+
+            rt = {
+                "AMOUNT_NODES": int(os.getenv("AMOUNT_NODES", "0") or 0),
+                "SIM_TIME":     int(os.getenv("SIM_TIME", "0") or 0),
+                "DIMS":         int(os.getenv("DIMS", "0") or 0),
+                "ENV_ID":       os.getenv("ENV_ID"),
+                "platform":     "cpu" if os.name == "nt" else "gpu",
+            }
+            with open(os.path.join(self.dir_config, "runtime.json"), "w", encoding="utf-8") as f:
+                json.dump(rt, f, indent=2)
+
+            print("_export_config_snapshot... done →", self.dir_config)
+        except Exception as e:
+            print(f"Warn _export_config_snapshot: {type(e).__name__}: {e}")
+
+    def _write_manifest(self):
+        # CHAR: tiny pointer-file that lists every product the sim wrote in this run. Walks
+        # `output/` once, records relative path → byte size; cheap and gives downstream tools a
+        # single index to discover artifacts without filesystem probing.
+        try:
+            files: Dict[str, int] = {}
+            for _root, _, _names in os.walk(self.out_root):
+                for fn in _names:
+                    if fn == "manifest.json":
+                        continue
+                    full = os.path.join(_root, fn)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        size = -1
+                    rel = os.path.relpath(full, self.out_root).replace("\\", "/")
+                    files[rel] = size
+            manifest = {
+                "results":        os.path.relpath(self.dir_results, self.out_root).replace("\\", "/"),
+                "ctlr":           os.path.relpath(self.dir_ctlr,    self.out_root).replace("\\", "/"),
+                "config":         os.path.relpath(self.dir_config,  self.out_root).replace("\\", "/"),
+                "visualizations": os.path.relpath(self.dir_viz,     self.out_root).replace("\\", "/"),
+                "files":          files,
+            }
+            with open(os.path.join(self.out_root, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+            print("manifest written →", os.path.join(self.out_root, "manifest.json"))
+        except Exception as e:
+            print(f"Warn _write_manifest: {type(e).__name__}: {e}")
 
 
 

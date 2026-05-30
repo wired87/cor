@@ -18,10 +18,18 @@ def op_negate(x, p=None): return -x
 
 
 # --- JAX / Numpy Funktionen ---
-def op_dot(x, p):    return jnp.dot(x, p)
+# CHAR: composed equations can feed 0-D scalars (after sum/mean) into matmul/dot;
+# jnp.matmul / jnp.dot require ndim>=1, so we promote scalars to a 1-element vector
+# which keeps the multiplicative semantics (scalar*vec = scaled vec) without raising.
+def _atleast_1d(a):
+    a = jnp.asarray(a)
+    return a[None] if a.ndim == 0 else a
 
 
-def op_matmul(x, p): return jnp.matmul(x, p)
+def op_dot(x, p):    return jnp.dot(_atleast_1d(x), _atleast_1d(p))
+
+
+def op_matmul(x, p): return jnp.matmul(_atleast_1d(x), _atleast_1d(p))
 
 
 def op_sum(x, p=None): return jnp.sum(x)

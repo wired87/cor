@@ -107,7 +107,7 @@ class Node(nnx.Module):
             return result
         except Exception as e:
             # CHAR: return scalar for scan/stack; avoid "Err" prefix in stdout
-            jax.debug.print("Node.core: {m}", m=str(e)[:200])
+            jax.debug.print("Err Node.core: {m}", m=str(e))
 
             return jnp.asarray(0.0, dtype=jnp.float32)
 
@@ -124,8 +124,9 @@ class Node(nnx.Module):
             """must_recompute = jnp.any(
                 jnp.isnan(bres))
             print("bres", bres)"""
-
+            print("...")
             result = self.runnable(*item)
+            print("result", result)
             return result
 
         kernel = jax.vmap(

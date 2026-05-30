@@ -12744,7 +12744,7 @@
             7
         ]
     ],
-    "AMOUNT_NODES": 1,
-    "SIM_TIME": 9,
+    "AMOUNT_NODES": 3,
+    "SIM_TIME": 3,
     "DIMS": 3
 }

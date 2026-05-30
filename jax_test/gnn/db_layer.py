@@ -189,11 +189,11 @@ class DBLayer:
         self.time_construct = self.time_construct / divisor
 
 
-
+    # prep... done
     def create_out_idx_map(self):
         # pre set idx map for faster sortin in run time
         def get_rel_db_idx(coord):
-            print("get_rel_db_idx coord", coord)
+            #print("get_rel_db_idx coord", coord)
             c = jnp.ravel(jnp.asarray(coord))
             return self.get_rel_db_index(c[-3], c[-2], c[-1])
 

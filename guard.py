@@ -509,10 +509,9 @@ class Guard:
                                 node=fid,
                                 trgt_rel="has_injection",
                             )
-                            print("injections", injections)
+                            #print("injections", injections)
 
                             if not injections or len(injections) == 0:
-                                print("No injections for", fid)
                                 continue
 
                             for inj_id, inj_attrs  in injections:

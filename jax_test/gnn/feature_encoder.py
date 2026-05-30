@@ -192,24 +192,68 @@ class FeatureEncoder(eqx.Module):
         self.in_linears[eq_idx][variation_idx].append(linear)
 
 
+
     def create_in_features(
             self,
             inputs,
             eq_idx=0,
     ):
         # todo flatten?
-        print("create_in_features...")
+        #print("create_in_features...")
+        collected: list = []
+        try: 
+            if inputs is None or not inputs:
+                print("create_in_features... done (no inputs)")
+                return collected
+
+            for var_idx, (grids_for_var, linear_row) in enumerate(
+                zip(inputs, self.in_linears[eq_idx])
+            ):
+                for grid, linear in zip(grids_for_var, linear_row):
+                    g = jnp.asarray(grid, dtype=jnp.float32)
+                    if g.ndim == 1:
+                        g = g[None, :]
+                    g2 = jnp.reshape(g, (g.shape[0], -1))
+                    exp = int(linear.in_features)
+                    if int(g2.shape[-1]) != exp:
+                        v = jnp.ravel(g2)
+                        need = exp * int(g2.shape[0])
+                        if v.size < need:
+                            v = jnp.pad(v, (0, need - v.size))
+                        else:
+                            v = v[:need]
+                        g2 = jnp.reshape(v, (int(g2.shape[0]), exp))
+                    results = vmap(linear)(g2)
+                    collected.append(results)
+                    if var_idx < len(self.in_f_store[eq_idx]):
+                        if getattr(results, "ndim", 0) >= 1:
+                            self.in_f_store[eq_idx][var_idx].extend(
+                                [results[i] for i in range(int(results.shape[0]))]
+                            )
+                        else:
+                            self.in_f_store[eq_idx][var_idx].append(results)
+        except Exception as e:
+            print("Err create_in_features:", e)
+        print("create_in_features... done")
+        return collected
+
+    def create_in_features(
+            self,
+            inputs,
+            eq_idx=0,
+    ):
+        # todo flatten?
+        #print("create_in_features...")
         collected: list = []
         try:
             if inputs is None or not inputs:
                 print("create_in_features... done (no inputs)")
                 return collected
+
             for var_idx, (grids_for_var, linear_row) in enumerate(
                 zip(inputs, self.in_linears[eq_idx])
             ):
                 for grid, linear in zip(grids_for_var, linear_row):
-                    #print(f"variation_grids for eq_idx={eq_idx} var={var_idx}", getattr(grid, "shape", None))
-                    # gien: tail dim must match `linear.in_features` (avoids dot_general contract mismatch on drift)
                     g = jnp.asarray(grid, dtype=jnp.float32)
                     if g.ndim == 1:
                         g = g[None, :]

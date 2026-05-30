@@ -242,7 +242,7 @@ def run_main_process(
     if _run_visualization_enabled(run_visualization):
         os.environ["SIM_TIME"] = str(max(1, int(sim_time)))
 
-        viz_root = visualization_dir or output_dir or os.path.join(_REPO_ROOT, "color_master_output")
+        viz_root = visualization_dir or output_dir or os.path.join(_REPO_ROOT, "output", "visualizations")
         viz_dir = run_workflow_visualization(
             viz_root,
             jax_guard=jax_guard,
@@ -253,6 +253,13 @@ def run_main_process(
         result["visualization_dir"] = viz_dir
         # gien: optional heavy payload (base64) — still useful for integrated clients
         result["visualizations"] = _slurp_visualizations(viz_dir)
+        # CHAR: viz artifacts are written AFTER `JaxGuard.main()` returns, so the manifest written
+        # in-engine missed them. Re-walk the output tree so `output/manifest.json` is the final
+        # ground-truth index of every product the run produced.
+        try:
+            jax_guard._write_manifest()
+        except Exception as exc:
+            print(f"Warn manifest refresh skipped: {type(exc).__name__}: {exc}")
     else:
         _step("visualization.skipped", reason="COLOR_MASTER_VIZ disabled")
         result["visualization_dir"] = None
@@ -265,7 +272,7 @@ if __name__ == "__main__":
 
     run_main_process(
         amount_nodes=3,
-        sim_time=max_len_inj + 2,
+        sim_time=3,
         dims=3,
         inj_cfg=inj_cfg
     )
