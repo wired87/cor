@@ -283,10 +283,6 @@ class FeatureEncoder(eqx.Module):
         return collected
 
 
-
-
-
-
     def blur_result_from_in_tree(
             self,
             eq_idx,
