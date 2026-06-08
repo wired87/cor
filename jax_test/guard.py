@@ -17,6 +17,8 @@ from jax_test.jax_utils.deserialize_in import parse_value
 
 def _to_json_serializable(data):
     """Convert JAX/numpy arrays and complex to JSON-serializable (list/dict)."""
+    if isinstance(data, (str, int, float, bool, type(None))):
+        return data
     if isinstance(data, list):
         return [_to_json_serializable(x) for x in data]
     if isinstance(data, tuple):
@@ -37,7 +39,7 @@ def _to_json_serializable(data):
         if isinstance(v, (complex, jnp.complexfloating)):
             return {"real": float(jnp.real(v)), "imag": float(jnp.imag(v))}
         return float(v) if hasattr(v, "real") else v
-    return data
+    return f"<{type(data).__name__} object>"
 
 
 def _sanitize_param_column_name(raw_id: str) -> str:
@@ -88,19 +90,18 @@ class JaxGuard:
         )
 
     def _init_output_layout(self) -> None:
-        """Create the separated output directory structure for this run."""
-        # gien: anchor at repo root (one above `jax_test/`) so the layout is independent of CWD
+        """Create flat `output/` root — all engine JSON artifacts live at top level."""
+        # gien: prompt — flat output folder; anchor at repo root so layout is CWD-independent
         _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.repo_root = _repo_root
-        self.out_root  = os.path.join(_repo_root, "output")
-        self.dir_results = os.path.join(self.out_root, "results")
-        self.dir_ctlr    = os.path.join(self.out_root, "ctlr")
-        self.dir_config  = os.path.join(self.out_root, "config")
-        self.dir_viz     = os.path.join(self.out_root, "visualizations")
-        for _d in (self.out_root, self.dir_results, self.dir_ctlr, self.dir_config, self.dir_viz):
-            os.makedirs(_d, exist_ok=True)
-        # canonical engine-state path (moved under `results/` — single source of truth)
-        self.save_path = os.path.join(self.dir_results, "engine_state.json")
+        self.out_root = os.path.join(_repo_root, "output")
+        # CHAR: single flat dir for results, ctlr, config, and viz file names (no nested sub-trees)
+        self.dir_results = self.out_root
+        self.dir_ctlr = self.out_root
+        self.dir_config = self.out_root
+        self.dir_viz = self.out_root
+        os.makedirs(self.out_root, exist_ok=True)
+        self.save_path = os.path.join(self.out_root, "engine_state.json")
 
     def divide_vector(self, vec, divisor):
         """Divide all values of a given vector by divisor. Returns array same shape as vec."""
@@ -182,11 +183,8 @@ class JaxGuard:
             print(f"Warn _export_ctlr: {type(e).__name__}: {e}")
 
     def _export_config_snapshot(self):
-        # CHAR: snapshot every config artifact that materially affects the run so a `output/`
-        # directory is self-contained and reproducible. Three pieces:
-        #   - `sim_config.json`  — verbatim copy of the source file at repo root (if present)
-        #   - `components.json`  — the actual cfg dict consumed by the engine (post `parse_value`)
-        #   - `runtime.json`     — process-level knobs (AMOUNT_NODES, SIM_TIME, DIMS, ENV_ID, plat)
+        # CHAR: snapshot config artifacts for a self-contained `output/` run.
+        # runtime.json is written by root `guard.py::Guard._export_runtime` from class args — not here.
         print("_export_config_snapshot...")
         try:
             src_cfg = os.path.join(self.repo_root, "sim_config.json")
@@ -195,16 +193,6 @@ class JaxGuard:
 
             with open(os.path.join(self.dir_config, "components.json"), "w", encoding="utf-8") as f:
                 json.dump(_to_json_serializable(self.cfg), f, indent=2)
-
-            rt = {
-                "AMOUNT_NODES": int(os.getenv("AMOUNT_NODES", "0") or 0),
-                "SIM_TIME":     int(os.getenv("SIM_TIME", "0") or 0),
-                "DIMS":         int(os.getenv("DIMS", "0") or 0),
-                "ENV_ID":       os.getenv("ENV_ID"),
-                "platform":     "cpu" if os.name == "nt" else "gpu",
-            }
-            with open(os.path.join(self.dir_config, "runtime.json"), "w", encoding="utf-8") as f:
-                json.dump(rt, f, indent=2)
 
             print("_export_config_snapshot... done →", self.dir_config)
         except Exception as e:
@@ -227,12 +215,11 @@ class JaxGuard:
                         size = -1
                     rel = os.path.relpath(full, self.out_root).replace("\\", "/")
                     files[rel] = size
+            # gien: flat layout — manifest is a single files map (rel_path -> byte_size)
             manifest = {
-                "results":        os.path.relpath(self.dir_results, self.out_root).replace("\\", "/"),
-                "ctlr":           os.path.relpath(self.dir_ctlr,    self.out_root).replace("\\", "/"),
-                "config":         os.path.relpath(self.dir_config,  self.out_root).replace("\\", "/"),
-                "visualizations": os.path.relpath(self.dir_viz,     self.out_root).replace("\\", "/"),
-                "files":          files,
+                "layout": "flat",
+                "root":   ".",
+                "files":  files,
             }
             with open(os.path.join(self.out_root, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2)

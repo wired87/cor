@@ -18,7 +18,7 @@ from jax_test.gnn.gnutils import GNUtils
 from jax_test.gnn.injector import InjectorLayer
 from jax_test.jax_utils.conv_flat_to_shape import bring_flat_to_shape
 from jax_test.mod import Node
-from jax_test.utils import create_runnable, SHIFT_DIRS
+from jax_test.utils import create_runnable, SHIFT_DIRS, cor_verbose
 
 
 # CHAR: walk arbitrarily nested lists / tuples / (jax|numpy) arrays and emit ONE contiguous
@@ -267,7 +267,7 @@ class GNN(GNUtils):
                 """
                 for shape in shapes:
                     # create placeholder
-                    flat = jnp.zeros(int(jnp.prod(jnp.array(shape))), dtype=jnp.int64)
+                    flat = jnp.zeros(int(jnp.prod(jnp.array(shape))), dtype=jnp.int32)
 
                     # create&save eq linears
                     self.feature_encoder.build_single_linear(
@@ -422,6 +422,7 @@ class GNN(GNUtils):
                 eq_idx,
                 flatten_transformed,
             )
+
             # gien: P stacked inputs for functools/vmap arity matching `runnable`
             inputs_flat, axis_def = self._stack_node_inputs(inputs_nested)
 
@@ -448,6 +449,7 @@ class GNN(GNUtils):
                 output=results,
                 eq_idx=eq_idx,
             )
+
             all_out_features.extend(out_features or [])
 
             # IN RAW
@@ -471,8 +473,6 @@ class GNN(GNUtils):
 
         self.feature_encoder.save_features(all_features)
 
-        # CHAR: snapshot the actual per-step tensors for serialization (independent of the
-        # `out_linears`-dependent save_out chain). One snapshot == one timestep.
         self._raw_outs_history.append(list(all_outs))
         self._features_history.append(list(all_features))
 
@@ -507,11 +507,13 @@ class GNN(GNUtils):
 
     def extract_flat_params(self, eq_idx, transformed):
         # gien: `transformed` is (V, P, 4) after `short_transformed`; one DB slice per (variation, param)
-        print("extract_flat_params...")
+        if cor_verbose():
+            print("extract_flat_params...")
         variations = jnp.asarray(transformed)
         ax_rows = self._variation_axis_rows_for_eq(eq_idx)
         if variations.ndim != 3 or variations.shape[-1] != 4:
-            print("extract_flat_params... done")
+            if cor_verbose():
+                print("extract_flat_params... done")
             return []
         v_cnt, p_cnt, _ = variations.shape
         if ax_rows and len(ax_rows) != v_cnt:
@@ -526,7 +528,8 @@ class GNN(GNUtils):
                 )
             flatten_transformed.append(single_param_grid)
 
-        print("extract_flat_params... done")
+        if cor_verbose():
+            print("extract_flat_params... done")
         return flatten_transformed
 
     def batch_rel_idx(self, batch):
@@ -579,7 +582,8 @@ class GNN(GNUtils):
         return rel_idx_map
 
     def shape_input(self, eq_idx, flatten_transformed):
-        print("shape_input...")
+        if cor_verbose():
+            print("shape_input...")
         inputs: list = []
         try:
             for variation_shapes_wrap, variation_grids in zip(
@@ -623,7 +627,8 @@ class GNN(GNUtils):
                         print("Warn shape_input cell:", _cell_e)
                         continue
                 inputs.append(per_shape_row)
-            print("shape_input... done")
+            if cor_verbose():
+                print("shape_input... done")
             return inputs
         except Exception as e:
             print("Err shape_input", e)

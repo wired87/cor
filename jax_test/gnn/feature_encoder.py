@@ -6,6 +6,8 @@ from jax import vmap
 import jax.numpy as jnp
 import equinox as eqx
 
+from jax_test.utils import cor_verbose
+
 class FeatureEncoder(eqx.Module):
     # represents singe eq
 
@@ -74,11 +76,13 @@ class FeatureEncoder(eqx.Module):
             output, # represent grid for each variation list[grid]
             eq_idx,
     ):
-        print("FeatureEncoder.out_processor...")
+        if cor_verbose():
+            print("FeatureEncoder.out_processor...")
         collected: list = []
         try:
             if output is None:
-                print("FeatureEncoder.out_processor... done (no output)")
+                if cor_verbose():
+                    print("FeatureEncoder.out_processor... done (no output)")
                 return collected
             _out_seq = output if isinstance(output, (list, tuple)) else [output]
             for i, (grid, linear_item) in enumerate(zip(_out_seq, self.out_linears[eq_idx])):
@@ -87,7 +91,8 @@ class FeatureEncoder(eqx.Module):
                 collected.append(results)
         except Exception as e:
             print("Err FeatureEncoder.out_processor:", e)
-        print("FeatureEncoder.out_processor... done")
+        if cor_verbose():
+            print("FeatureEncoder.out_processor... done")
         return collected
 
     @property
@@ -203,7 +208,8 @@ class FeatureEncoder(eqx.Module):
         collected: list = []
         try: 
             if inputs is None or not inputs:
-                print("create_in_features... done (no inputs)")
+                if cor_verbose():
+                    print("create_in_features... done (no inputs)")
                 return collected
 
             for var_idx, (grids_for_var, linear_row) in enumerate(
@@ -234,7 +240,8 @@ class FeatureEncoder(eqx.Module):
                             self.in_f_store[eq_idx][var_idx].append(results)
         except Exception as e:
             print("Err create_in_features:", e)
-        print("create_in_features... done")
+        if cor_verbose():
+            print("create_in_features... done")
         return collected
 
     def create_in_features(
@@ -247,7 +254,8 @@ class FeatureEncoder(eqx.Module):
         collected: list = []
         try:
             if inputs is None or not inputs:
-                print("create_in_features... done (no inputs)")
+                if cor_verbose():
+                    print("create_in_features... done (no inputs)")
                 return collected
 
             for var_idx, (grids_for_var, linear_row) in enumerate(
@@ -279,7 +287,8 @@ class FeatureEncoder(eqx.Module):
                             self.in_f_store[eq_idx][var_idx].append(results)
         except Exception as e:
             print("Err create_in_features:", e)
-        print("create_in_features... done")
+        if cor_verbose():
+            print("create_in_features... done")
         return collected
 
 

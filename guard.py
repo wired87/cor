@@ -22,6 +22,11 @@ from utils._np.expand_array import expand_structure
 EXCLUDED_ORIGINS = ["neighbor", "interactant"]
 
 
+# gien: prompt — gate hot-loop debug prints so Guard graph build stays fast unless COR_VERBOSE=1
+def _cor_verbose() -> bool:
+    return (os.environ.get("COR_VERBOSE") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 class Guard:
 
     def __init__(
@@ -35,7 +40,6 @@ class Guard:
         injector = None,
         cfg_file="sim_config.json"
     ):
-
         print("Initializing Guard...")
         self.user_id = user_id
         print("DEBUG: QBrainTableManager initialized")
@@ -75,8 +79,28 @@ class Guard:
         self.cfg_file = os.path.join(_repo_root, _cfg_name)
 
         self.fields = []
+        # gien: flat output root beside repo — runtime.json lands here from Guard.main (not JaxGuard)
+        self._out_root = os.path.join(_repo_root, "output")
         print("Guard Initialized!")
 
+
+    def _export_runtime(self, env_id: str) -> None:
+        # gien: prompt — persist runtime specs from class args + main(env_id), never from os.environ
+        try:
+            os.makedirs(self._out_root, exist_ok=True)
+            rt = {
+                "AMOUNT_NODES": int(self.amount_nodes),
+                "SIM_TIME":     int(self.sim_time),
+                "DIMS":         int(self.dims),
+                "ENV_ID":       env_id,
+                "platform":     "cpu" if os.name == "nt" else "gpu",
+            }
+            _path = os.path.join(self._out_root, "runtime.json")
+            with open(_path, "w", encoding="utf-8") as f:
+                json.dump(rt, f, indent=2)
+            print("runtime.json saved →", _path)
+        except Exception as exc:
+            print(f"Warn _export_runtime: {type(exc).__name__}: {exc}")
 
 
     def _ensure_ghost_module(self, env_id: str) -> None:
@@ -149,7 +173,7 @@ class Guard:
         with open(self.cfg_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(components, indent=4, ensure_ascii=False))
 
-        #print("components", components)
+        self._export_runtime(env_id)
         return components
 
     def handle_deployment(self, env_id, components):
@@ -1227,7 +1251,8 @@ class Guard:
                     node=mid,
                     as_dict=True,
                 )
-                print(f"mid {mid} has methods {len(methods)}")
+                if _cor_verbose():
+                    print(f"mid {mid} has methods {len(methods)}")
                 if not methods:
                     print("set_edge_db_to_method... len methods 0")
                     continue
@@ -1261,7 +1286,6 @@ class Guard:
                         if not params_origin:
                             params_origin = [""] * len(params)
 
-
                         for fidx, (fid, fattrs) in enumerate(fields):
                             field_index = fattrs["field_index"]
                             field_eq_param_struct = []
@@ -1288,7 +1312,8 @@ class Guard:
 
                                 param_collector = []
                                 param_origin_key_collector = []
-                                print("work pid", pid)
+                                if _cor_verbose():
+                                    print("work pid", pid)
 
                                 # Field's own param
                                 is_prev_pre = pid.startswith("prev_")
@@ -1307,7 +1332,6 @@ class Guard:
                                     current_param=final_key,
                                     self_field_params=keys,
                                 )
-
 
                                 # SELF PARAM?
                                 if is_self_param is True:
@@ -1417,14 +1441,16 @@ class Guard:
                                                 pindex,
                                             )
                                         )
-                                print(f"add {len(param_collector)} to field_eq_param_struct")
+                                if _cor_verbose():
+                                    print(f"add {len(param_collector)} to field_eq_param_struct")
                                 field_eq_param_struct.append(param_collector)
 
                             # Upscale variation struct
                             expand_field_eq_variation_struct = expand_structure(
                                 struct=field_eq_param_struct
                             )
-                            print(f"expand_field_eq_variation_struct for {eqid}", len(expand_field_eq_variation_struct), expand_field_eq_variation_struct)
+                            if _cor_verbose():
+                                print(f"expand_field_eq_variation_struct for {eqid}", len(expand_field_eq_variation_struct), expand_field_eq_variation_struct)
                             param_struct = {}
                             for key, value in zip(params, expand_field_eq_variation_struct):
                                 param_struct[key] = value
@@ -1483,10 +1509,12 @@ class Guard:
         in_self_params:bool = current_param in self_field_params
         is_self_prefixed = current_param.startswith("_")
         if external_param is True:
-            print(f"{current_param} in xternal field")
+            if _cor_verbose():
+                print(f"{current_param} in xternal field")
             return False
         elif in_self_params is True or is_self_prefixed:
-            print(f"{current_param} in self field")
+            if _cor_verbose():
+                print(f"{current_param} in self field")
             return True
 
 

@@ -635,9 +635,8 @@ class FieldUtils:
     def set_interaction(self):
         ggc = {k: [*QUARKS, *[g for g in GLON_MAP if g != k]] for k in GLON_MAP}
 
-        # qmap: each quark color has photon, w+, w-, z and all gluons
         qmap = {
-            q: ["photon", "w_plus", "w_minus", "z_boson", *GLON_MAP]
+            q: ["photon", "w_plus", "w_minus", "z_boson", *GLON_MAP] #*GLON_MAP -> already defined in ggc
             for q in QUARKS
         }
 
@@ -687,5 +686,5 @@ class FieldUtils:
                     "electron", "muon", "tau", "tau_neutrino", "muon_neutrino", "electron_neutrino",
                 ]},
                 "GAUGE": {"higgs_field": ["w_plus", "w_minus", "z_boson"]},
-            }
+            },
         }

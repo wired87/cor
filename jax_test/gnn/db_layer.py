@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from Tools.demo.sortvisu import Array
+# from Tools.demo.sortvisu import Array
 from jax import jit, vmap
 import numpy as np
 
@@ -36,26 +36,27 @@ class DBLayer:
         self.SCALED_PARAMS = []
         self.nodes = []
 
+        # gien: int32 matches default JAX on Windows — avoids int64 truncation warnings
         self.AMOUNT_PARAMS_PER_FIELD = jnp.asarray(
             AMOUNT_PARAMS_PER_FIELD,
-            dtype=jnp.int64,
+            dtype=jnp.int32,
         )
 
-        self.DB_PARAM_CONTROLLER = jnp.asarray(DB_PARAM_CONTROLLER, dtype=jnp.int64)
+        self.DB_PARAM_CONTROLLER = jnp.asarray(DB_PARAM_CONTROLLER, dtype=jnp.int32)
         self.DB_SHAPE = DB_SHAPE
 
         # len fields per mod
         self.FIELDS = jnp.array(FIELDS)
 
-        self.METHODS_PER_MOD_LEN_CTLR = jnp.array(METHODS_PER_MOD_LEN_CTLR, jnp.int64)
-        self.METHOD_TO_DB = jnp.array(METHOD_TO_DB, dtype=jnp.int64)
-        self.DB_TO_METHOD_EDGES = jnp.asarray(DB_TO_METHOD_EDGES, dtype=jnp.int64)
+        self.METHODS_PER_MOD_LEN_CTLR = jnp.array(METHODS_PER_MOD_LEN_CTLR, jnp.int32)
+        self.METHOD_TO_DB = jnp.array(METHOD_TO_DB, dtype=jnp.int32)
+        self.DB_TO_METHOD_EDGES = jnp.asarray(DB_TO_METHOD_EDGES, dtype=jnp.int32)
 
         # convert bytes array
         self.SCALED_PARAMS:list[int] = []
         self.DB_CTL_VARIATION_LEN_PER_FIELD = jnp.array(
             DB_CTL_VARIATION_LEN_PER_FIELD,
-            jnp.int64
+            jnp.int32
         )
 
         self.FIELDS_CUMSUM = jnp.concatenate([
@@ -387,7 +388,7 @@ class DBLayer:
         flat = jnp.ravel(item)
         return flat
 
-    def flatten_result(self, results) -> list | Array:
+    def flatten_result(self, results) -> list | jnp.ndarray:
         try:
             def _to_1d(x):
                 # gien: failed node / partial pipeline may leave None in raw_out batch

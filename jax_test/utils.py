@@ -16,9 +16,15 @@ SHIFT_DIRS = [
 DIM = 3
 
 import ast
+import os
 import re
 import jax.numpy as jnp
 import jax
+
+
+# gien: prompt — gate JAX hot-path stdout; default off for fast simulation runtime
+def cor_verbose() -> bool:
+    return (os.environ.get("COR_VERBOSE") or "0").strip().lower() in ("1", "true", "yes", "on")
 
 # CHAR: exec'd equation code calls `jnp.matmul` / `jnp.dot` directly. Composed
 # expressions can yield 0-D scalars (after sum/mean) as operands, which JAX

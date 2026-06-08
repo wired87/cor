@@ -1,0 +1,2 @@
+# COR GUI — install: pip install -r gui/requirements.txt
+nicegui>=2.0.0

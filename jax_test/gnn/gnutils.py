@@ -1,16 +1,20 @@
 """GNUtils: variation block helpers for jax_test.gnn (short_transformed aligns (V,P,4) with axis rows)."""
 import jax.numpy as jnp
 
+from jax_test.utils import cor_verbose
+
 
 class GNUtils:
 
     #
     def short_transformed(self, ax_rows, variations):
         # gien: `variations` is (V, P, 4); `ax_rows` has length V with one axis int per param p — no (P,V) transpose
-        print("short_transformed... ")
+        if cor_verbose():
+            print("short_transformed... ")
         v_arr = jnp.asarray(variations)
         if v_arr.ndim != 3 or v_arr.shape[-1] != 4:
-            print("short_transformed... done")
+            if cor_verbose():
+                print("short_transformed... done")
             return v_arr
         v_arr = jnp.array(v_arr)
         v_cnt, p_cnt, _ = v_arr.shape
@@ -25,7 +29,8 @@ class GNUtils:
                 ref = v_arr[0, p, :]
                 for v in range(v_cnt):
                     v_arr = v_arr.at[v, p, :].set(ref)
-        print("short_transformed... done")
+        if cor_verbose():
+            print("short_transformed... done")
         return v_arr
 
     #

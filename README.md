@@ -34,6 +34,17 @@ From the repository root:
 python main.py
 ```
 
+### Local engine control GUI
+
+Modular control terminal (does not modify the core pipeline):
+
+```bash
+pip install -r gui/requirements.txt
+python -m gui
+```
+
+Opens `http://127.0.0.1:8765` — set sim params, run the engine in a background thread, stream live terminal output, and inspect flat `output/` artifacts.
+
 ## Important note about equations and fields
 
 The engine is designed to work with **all kinds of equations**, as long as:
@@ -85,3 +96,38 @@ The engine is designed to work with **all kinds of equations**, as long as:
   - `render_gridpoint_visualizations(jax_guard, output_root, *, amount_nodes, ...)` — orchestrator. Loops over every `(x, y, z) ∈ {0..N-1}^3`, writes a folder `gridpoints/g_{x}_{y}_{z}/` with `freq_chart.png` + `3d_activity.gif`. Also writes `gridpoints/index.json` carrying the field palette legend (`field_index → label → rgb`) and the grid-point map so downstream tools can reconstruct the colour/label mapping without re-reading the controller.
   - `color_master/sim_bridge.py::run_workflow_visualization` — calls the new orchestrator after the white→blue main animation step. Wrapped in try/except so per-point viz can never break the workflow.
   - Verified: `py -3.11 main.py` produced `27` per-grid-point folders (T=3, F=38, N=3); `g_0_0_0/` contains `3d_activity.gif` (~79 KB) + `freq_chart.png` (~108 KB); top-level `gridpoints/index.json` (~11.7 KB) carries the palette legend.
+- 2026-06-07 — Added modular `gui/` local engine control terminal (NiceGUI):
+  - `gui/engine_bridge.py` — lazy-imports `main.run_main_process`, runs in background thread with stdout tee.
+  - `gui/panels/{control,terminal,dashboard}.py` — sim params, live log stream, flat `output/` dashboard + GIF preview.
+  - Entry: `python -m gui` (port 8765); zero edits to core pipeline modules.
+- 2026-06-07 — Moved `runtime.json` export from `JaxGuard` to root `Guard`:
+  - `guard.py::Guard._export_runtime`: writes flat `output/runtime.json` from constructor args (`amount_nodes`, `sim_time`, `dims`) + `main(env_id)` — no `os.environ` lookups.
+  - `jax_test/guard.py::_export_config_snapshot`: no longer writes `runtime.json` (only `sim_config.json` + `components.json`).
+- 2026-06-07 — Added architecture plans for upcoming blueprint + adaptive-sim workflows:
+  - `future_perspectives_01_image_blueprint_injection.md` — image → centered 3D line blueprint → `InjectionRequestCfg` → post-`output/` adaptation.
+  - `future_perspectives_02_sim_analysis_adaptive_loop.md` — JAX pathfinder loop on `jax_test/gnn/pathfinder.py` for unknown-objective runs.
+- 2026-06-07 — Refactored `color_master` into modular layout (removed unused MCP/Docker/test artifacts):
+  - `workflow.py` — `run_workflow_visualization`; `series_collect.py` — JaxGuard data extraction; `path_viz.py` — indexed offline viz; `render/` — matplotlib renderers; `types.py` / `engine_payload.py` / `viz_config.py` / `grid_point.py` — shared I/O.
+  - Repo `main.py` imports `color_master.workflow` directly; `sim_bridge.py` kept as backward-compat shim.
+- 2026-06-07 — Debugged main pipe for fast runtime + flat `output/` layout:
+  - Gated hot-loop stdout behind `COR_VERBOSE=1` in `guard.py`, `jax_test/gnn/{gnn,gnutils,feature_encoder}.py`, and removed vmap-path prints in `jax_test/mod.py::Node.core` — prior runs were I/O-bound on thousands of per-equation log lines and appeared hung during JAX sim.
+  - `jax_test/guard.py::_init_output_layout`: all engine JSON artifacts now write flat into `output/` (`engine_state.json`, `db_ctlr.json`, `model_ctlr.json`, `sim_config.json`, `components.json`, `runtime.json`, `manifest.json`).
+  - `main.py`: default `output_dir=output/`; skips base64 viz slurp unless `COR_SLURP_VIZ=1`.
+  - `color_master/sim_bridge.py`: light preset skips per-key 3D build; main GIF → `output/environment_3d.gif`; per-grid-point viz off unless `COR_GRIDPOINT_VIZ=1`.
+  - `jax_test/gnn/db_layer.py` + `gnn.py`: controller index arrays use `int32` (matches default JAX on Windows, silences int64 truncation warnings).
+  - Verified: `py -3.11 main.py` exits 0; `output/engine_state.json` ~12 MB; `output/environment_3d.gif` written flat.
+- 2026-05-30 — Added `qfu/gluon_neighbors.py` gluon 3D mesh neighbor resolver:
+  - `build_gluon_neighbor_map(amount_nodes)` → `dict[px_id, dict[gluon_k, list[(neighbor_px, neighbor_gluon_j)]]]`. Each pixel is `px_{x}_{y}_{z}`; gluons are `gluon_0..7` (sub-cube corners). Uses `FieldUtils.shift_dirs` for the same 26-offset stencil as `qf_utils.npm` / `all_px_neighbors`. Sub-cube face matching picks the partner gluon at the shared interface (corner gluons own one octant ≈ 7 directions each; all 8 gluons cover the full 26-direction stencil per pixel). Verified: `py -3.11 qfu/gluon_neighbors.py` with `AMOUNT_NODES=3`.
+
+## Theory (from here on)
+
+Each **grid point** represents one **3D cube** (pixel / QFN cell). Inside that cube sit the **8 gauge sub-points** (`gluon_0` … `gluon_7`) as corners of the unit cell. **Gauge interaction** (gluon–gluon, gluon–quark, …) defines what happens **inside** the cube and at its faces to neighboring cubes; **fermion / quark** fields carry the internal state whose evolution is driven by those gauge couplings. The simulation stack should treat **topology** (who couples to whom across the 26-neighbor stencil) and **tensor layout** (flat DB slices with identical length per method) as separate, coordinated concerns — not as millions of blind graph edges.
+
+## TODO — gauge mesh & uniform DB shape
+
+- **Problem:** Per 3D gauge sub-point, interaction partners are **offset** (face-matched gluon indices differ by direction). A naive static edge `g1 → g2` does not capture the full stencil; the correct pattern looks more like `g1 → [g2, g6, g2, g6, …]` per direction slot — same **total shape length** for every method param, but **partner index varies** by mesh direction.
+- **Idea:** Shape length can still be held **constant** through a **logical mix of grids** (search for improvements): encode the 26-direction neighbor gluon indices as a **fixed-width partner list** per source gluon, not as one global `g1→g2` pair. Result: all method inputs keep the same flat length; only the **index map** changes per slot.
+- **`Guard.create_db`:** extend so **`db_to_method`** builds **`split_grid` including coords directly** (grid index + sub-gluon index + direction baked into the slice metadata, not inferred later in JAX).
+- **`method_to_db` / `set_edge_method_to_db`:** consume the same **`split_grid` → unified format** so `METHOD_TO_DB` rows and `DBLayer.extract_flattened_grid` agree on layout.
+- **Reference:** `qfu/gluon_neighbors.py` (`paired_neighbor_gluon_index`, `build_gluon_neighbor_map`) for the static partner-index rules; export compact mesh arrays in `components` (CSR / stencil) rather than materializing full nx edge lists.
+- **Open:** evaluate stencil / roll-based JAX ops vs. explicit partner lists for `gg_coupling` and related gauge equations once `split_grid` is unified.

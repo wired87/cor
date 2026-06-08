@@ -32,15 +32,15 @@ class EngineState(TypedDict):
     serialized_f_out:   Base64Str    # flattened per-step `all_features` history
 
 
-# --- output/config/runtime.json --------------------------------------------------------
+# --- output/runtime.json --------------------------------------------------------
 
 class RuntimeConfig(TypedDict):
-    """Body of `output/config/runtime.json` — process-level knobs of one run."""
+    """Body of `output/runtime.json` — process-level knobs (written by root `Guard`)."""
 
     AMOUNT_NODES: int                # nodes per spatial dim — also in SimConfig
     SIM_TIME:     int                # number of timesteps    — also in SimConfig
     DIMS:         int                # spatial dimensions     — also in SimConfig
-    ENV_ID:       Optional[EnvId]    # `os.getenv("ENV_ID")`, may be None
+    ENV_ID:       Optional[EnvId]    # from `Guard.main(env_id=...)`, may be None
     platform:     str                # "cpu" on Windows, "gpu" elsewhere
 
 

@@ -2,6 +2,8 @@
 
 Prompt (2026-05): Understand `main.py` entry, run and capture console under `test_out/`, analyze failures,
 apply clean minimal fixes so the engine exits 0; preserve existing comments; update README progress.
+Prompt (2026-06): Debug main pipe from terminal errors; safe edits for fast simulation runtime;
+save all resulting files in a flat `output/` folder.
 """
 
 import os
@@ -24,7 +26,7 @@ from qfu.qf_utils import QFUtils
 from sm_manager.sm_manager import SMManager
 from jax_test.guard import JaxGuard
 # gien: single import surface for post-simulation visualization (avoids duplicate trailing import block)
-from color_master.sim_bridge import run_workflow_visualization
+from color_master.workflow import run_workflow_visualization
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _REPO_ROOT not in sys.path:
@@ -120,7 +122,7 @@ def run_color_master_from_config(
     Path-based color_master: load `sim_cfg.json` and enriched `local.json` (param_series + ctlr).
     Does not run JAX. Returns output subdirectory path (indexed GIF).
     """
-    from color_master.main import run_path_based_viz
+    from color_master.path_viz import run_path_based_viz
 
     return run_path_based_viz(sim_cfg_path)
 
@@ -186,6 +188,12 @@ def _run_visualization_enabled(explicit: Optional[bool]) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _slurp_viz_enabled() -> bool:
+    # gien: prompt — base64 slurp is heavy; skip unless COR_SLURP_VIZ=1 (MCP clients opt in)
+    raw = (os.environ.get("COR_SLURP_VIZ") or "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def run_main_process(
     amount_nodes: int,
     sim_time: int,
@@ -238,11 +246,14 @@ def run_main_process(
     jax_guard = JaxGuard(cfg=components).main()
 
 
-    result: Dict[str, Any] = {"components": components, "jax_finished": True}
+    # gien: prompt — flat `output/` root for engine + viz artifacts (no nested sub-trees)
+    _flat_out = output_dir or os.path.join(_REPO_ROOT, "output")
+
+    result: Dict[str, Any] = {"components": components, "jax_finished": True, "output_dir": _flat_out}
     if _run_visualization_enabled(run_visualization):
         os.environ["SIM_TIME"] = str(max(1, int(sim_time)))
 
-        viz_root = visualization_dir or output_dir or os.path.join(_REPO_ROOT, "output", "visualizations")
+        viz_root = visualization_dir or _flat_out
         viz_dir = run_workflow_visualization(
             viz_root,
             jax_guard=jax_guard,
@@ -251,8 +262,8 @@ def run_main_process(
             quality_preset="light",
         )
         result["visualization_dir"] = viz_dir
-        # gien: optional heavy payload (base64) — still useful for integrated clients
-        result["visualizations"] = _slurp_visualizations(viz_dir)
+        # gien: optional heavy payload (base64) — only when COR_SLURP_VIZ=1
+        result["visualizations"] = _slurp_visualizations(viz_dir) if _slurp_viz_enabled() else None
         # CHAR: viz artifacts are written AFTER `JaxGuard.main()` returns, so the manifest written
         # in-engine missed them. Re-walk the output tree so `output/manifest.json` is the final
         # ground-truth index of every product the run produced.
@@ -274,5 +285,6 @@ if __name__ == "__main__":
         amount_nodes=3,
         sim_time=3,
         dims=3,
-        inj_cfg=inj_cfg
+        inj_cfg=inj_cfg,
+        output_dir=os.path.join(_REPO_ROOT, "output"),
     )
